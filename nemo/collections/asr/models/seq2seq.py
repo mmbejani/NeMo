@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Tuple
 
 import torch
 from torch.nn.functional import log_softmax
@@ -111,8 +111,28 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
         
 
     @typecheck()
-    def forward(self, input_signal, input_signal_length=None, target_length=None):
-        encoder_output = self.encoder(input_signal, input_signal_length)
+    def forward(self, input_signal, input_signal_length=None, target_length=None) -> Tuple[torch.Tensor]:
+        """Forwad through seq2seq model
+
+        Args:
+            input_signal (_type_): _description_
+            input_signal_length (_type_, optional): _description_. Defaults to None.
+            target_length (_type_, optional): _description_. Defaults to None.
+
+        Returns:
+            Tuple[torch.Tensor]: There are three tensors as following:
+                1- The logits output of decoder (unnormlized)
+                2- The prediction of encoder based on CTC
+                3- The length of output that encoder is processed
+        """
+        processed_signal, processed_signal_length = self.preprocessor(
+            input_signal=input_signal, length=input_signal_length,
+        )
+
+        if self.spec_augmentation is not None and self.training:
+            processed_signal = self.spec_augmentation(input_spec=processed_signal, length=processed_signal_length)
+
+        encoder_output = self.encoder(processed_signal, processed_signal_length)
         encoded, encoded_len = encoder_output[0], encoder_output[1]
         ctc_prediction = self.ctc_linear(encoded)
         logits_list = []
@@ -125,8 +145,10 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
             logits_list.append(logits)
             next_tokens = torch.argmax(logits, dim=-1)
             output_tensor = torch.cat([output_tensor, self.embedding(next_tokens)], dim=1)
+        
+        logits = torch.cat(logits_list, dim=1)
 
-        return logits_list, ctc_prediction, encoded_len
+        return logits, ctc_prediction, encoded_len
 
 
     @torch.no_grad()

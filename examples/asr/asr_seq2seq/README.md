@@ -1,0 +1,2 @@
+# Speech to Text based on Sequence to Sequence 
+It is hard to train a model based on `CTCLoss` solitary with many output tokens e.g. BPE Tokenizer with 5k tokens. Therefore, it is worthy that use an auxiliray network that decode the output of CTC model into arbitariy length (the length of the transcription) then use simpler loss function e.g. `CrossEntropyLoss` to classify the output tokens.
