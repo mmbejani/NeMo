@@ -61,12 +61,15 @@ class Seq2SeqLoss(Serialization, Typing):
         # here we transpose because we expect [B, T, D] while PyTorch assumes [T, B, D]
         # Pytroch assumption is better :)
         log_probs = log_probs.transpose(1, 0)
-        loss = self.seq_loss(logits, targets) + self.ctc_weight * \
-               self.ctc_loss(log_probs=log_probs, 
+        seq_loss = self.seq_loss(logits, targets)
+        ctc_loss = self.ctc_loss(log_probs=log_probs, 
                              targets=targets,
                              input_lengths=input_lengths, 
                              target_lengths=target_lengths)
+        loss = seq_loss + self.ctc_weight * ctc_loss
 
         if self._apply_reduction:
             loss = self.reduce(loss, target_lengths)
-        return loss
+            seq_loss = self.reduce(seq_loss, target_lengths)
+            ctc_loss = self.reduce(ctc_loss, target_lengths)
+        return loss, seq_loss, ctc_loss

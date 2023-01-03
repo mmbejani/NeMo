@@ -1,7 +1,8 @@
 from typing import List
 
 import torch
-from omegaconf import DictConfig, ListConfig, OmegaConf, open_dict
+from torch.nn.functional import log_softmax
+from omegaconf import DictConfig, ListConfig, open_dict
 
 from nemo.collections.asr.models import ASRModel
 from nemo.collections.asr.parts.mixins import ASRBPEMixin
@@ -75,12 +76,39 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
         seq_output, ctc_output, encoded_len = self.forward(input_signal=signal, 
                                                            input_signal_length=signal_len, 
                                                            target_length=transcript_len)
-        loss_value = self.loss()
+        loss_value, seq_loss, ctc_loss = self.loss(log_probs=ctc_output, logits=seq_output, 
+                                                   targets=transcript, inputs_len=encoded_len,
+                                                   targets_len=transcript_len)
+
+        if AccessMixin.is_access_enabled():
+            AccessMixin.reset_registry(self)
+
+        tensorboard_logs = {
+            'train_loss': loss_value,
+            'train_seq_loss': seq_loss,
+            'train_ctc_loss': ctc_loss,
+            'learning_rate': self._optimizer.param_groups[0]['lr'],
+            'global_step': torch.tensor(self.trainer.global_step, dtype=torch.float32),
+        }
+
+        if hasattr(self, '_trainer') and self._trainer is not None:
+            log_every_n_steps = self._trainer.log_every_n_steps
+        else:
+            log_every_n_steps = 1
+
+        if (batch_idx + 1) % log_every_n_steps == 0:
+            self._wer.update(
+                predictions=torch.nn.functional.softmax(seq_output, dim=-1),
+                targets=transcript,
+                target_lengths=transcript_len,
+                predictions_lengths=encoded_len,
+            )
+            wer, _, _ = self._wer.compute()
+            self._wer.reset()
+            tensorboard_logs.update({'training_batch_wer': wer})
+
+        return {'loss': loss_value, 'log': tensorboard_logs}
         
-        
-
-
-
 
     @typecheck()
     def forward(self, input_signal, input_signal_length=None, target_length=None):
@@ -104,10 +132,6 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
     @torch.no_grad()
     def transcribe(self, audio_bytes: List[bytes]) -> List[str]:
         pass
-
-
-
-
 
 
 class Seq2SeqModelWithLM(Seq2SeqModel):
