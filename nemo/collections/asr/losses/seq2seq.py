@@ -1,7 +1,7 @@
 from torch import nn
 
 from nemo.core.classes import Serialization, Typing, typecheck
-from nemo.core.neural_types import LabelsType, LengthsType, LogprobsType, LossType, NeuralType
+from nemo.collections.common.losses import CrossEntropyLoss
 
 
 class Seq2SeqLoss(Serialization, Typing):
@@ -21,7 +21,7 @@ class Seq2SeqLoss(Serialization, Typing):
             self._apply_reduction = False
         
         self.ctc_loss = nn.CTCLoss(blank=self._blank, reduction=ctc_reduction, zero_infinity=zero_infinity)
-        self.seq_loss = nn.CrossEntropyLoss()
+        self.seq_loss = CrossEntropyLoss()
         self.ctc_weight = ctc_weight
 
 

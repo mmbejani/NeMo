@@ -175,3 +175,4 @@ examples/neural_graphs/*.yml
 .hydra/
 nemo_experiments/
 
+examples/asr/asr_seq2seq/vocab.txt

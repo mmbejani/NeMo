@@ -28,7 +28,7 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
 
         if 'tokenizer' not in cfg:
             raise ValueError("`cfg` must have `tokenizer` config to create a tokenizer !")
-        self._setup_tokenizer()
+        self._setup_tokenizer(cfg.tokenizer)
         vocabulary = self.tokenizer.tokenizer.get_vocab()
 
 
@@ -154,6 +154,17 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
     @torch.no_grad()
     def transcribe(self, audio_bytes: List[bytes]) -> List[str]:
         pass
+
+    def setup_training_data(self, *args, **kwargs):
+        pass
+
+    def setup_validation_data(self, *args, **kwargs):
+        pass
+
+    def setup_test_data(self, *args, **kwargs):
+        pass
+
+
 
 
 class Seq2SeqModelWithLM(Seq2SeqModel):

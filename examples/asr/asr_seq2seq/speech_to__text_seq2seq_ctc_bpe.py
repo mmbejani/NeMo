@@ -72,7 +72,6 @@ from nemo.core.config import hydra_runner
 from nemo.utils import logging
 from nemo.utils.exp_manager import exp_manager
 
-
 @hydra_runner(config_path="../conf/conformer/", config_name="conformer_seq_ctc_bpe")
 def main(cfg):
     logging.info(f'Hydra config: {OmegaConf.to_yaml(cfg)}')
@@ -81,11 +80,11 @@ def main(cfg):
     exp_manager(trainer, cfg.get("exp_manager", None))
     asr_model = Seq2SeqModel(cfg=cfg.model, trainer=trainer)
 
-    trainer.fit(asr_model)
+    # trainer.fit(asr_model)
 
-    if hasattr(cfg.model, 'test_ds') and cfg.model.test_ds.manifest_filepath is not None:
-        if asr_model.prepare_test(trainer):
-            trainer.test(asr_model)
+    # if hasattr(cfg.model, 'test_ds') and cfg.model.test_ds.manifest_filepath is not None:
+    #     if asr_model.prepare_test(trainer):
+    #         trainer.test(asr_model)
 
 
 if __name__ == '__main__':
