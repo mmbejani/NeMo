@@ -98,7 +98,7 @@ model:
     _target_: nemo.collections.asr.modules.ConformerEncoder
     feat_in: ${model.preprocessor.features}
     feat_out: -1 # you may set it if you need different output size other than the default d_model
-    n_layers: 1
+    n_layers: 5
     d_model: 176
 
     # Sub-sampling params
