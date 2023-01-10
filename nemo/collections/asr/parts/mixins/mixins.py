@@ -27,7 +27,6 @@ from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis
 from nemo.collections.common import tokenizers
 from nemo.utils import logging
 
-
 class ASRBPEMixin(ABC):
     """ ASR BPE Mixin class that sets up a Tokenizer via a config
 
@@ -57,8 +56,72 @@ class ASRBPEMixin(ABC):
             raise ValueError("`tokenizer.type` cannot be None")
         elif tokenizer_type.lower() == 'agg':
             self._setup_aggregate_tokenizer(tokenizer_cfg)
+        elif tokenizer_type.lower() == 'dual':
+            self._setup_dual_tokenizer(tokenizer_cfg)
         else:
             self._setup_monolingual_tokenizer(tokenizer_cfg)
+
+    def _setup_dual_tokenizer(self, tokenizer_cfg: DictConfig):
+        self.tokenizer_cfg = OmegaConf.to_container(tokenizer_cfg, resolve=True)  # type: dict
+        self.tokenizer_encoder_dir = self.tokenizer_cfg.pop('encoder_dir')
+        self.tokenizer_decoder_dir = self.tokenizer_cfg.pop('decoder_dir')
+        self.tokenizer_type = self.tokenizer_cfg.pop('type').lower()
+
+        if hasattr(self, 'cfg') and 'tokenizer' in self.cfg:
+            self.cfg.tokenizer_encoder.dir = self.tokenizer_encoder_dir
+            self.cfg.tokenizer_decoder.dir = self.tokenizer_decoder_dir
+            self.cfg.tokenizer.type = self.tokenizer_type
+
+        if self.tokenizer_type not in 'bpe':
+            raise ValueError("`tokenizer.type` must be `bpe` for SentencePiece tokenizer")
+
+        if 'encoder_model_path' in self.tokenizer_cfg:
+            encoder_model_path = self.tokenizer_cfg.get('encoder_model_path')
+        if 'decoder_model_path' in self.tokenizer_cfg:
+            decoder_model_path = self.tokenizer_cfg.get('decoder_model_path')
+        else:
+            encoder_model_path = os.path.join(self.tokenizer_dir, 'tokenizer.model')
+            decoder_model_path = os.path.join(self.tokenizer_dir, 'tokenizer.model')
+        self.encoder_model_path = encoder_model_path
+        self.decoder_model_path = decoder_model_path
+
+        self.encoder_tokenizer = tokenizers.SentencePieceTokenizer(model_path=self.encoder_model_path)
+        self.decoder_tokenizer = tokenizers.SentencePieceTokenizer(model_path=self.decoder_model_path)
+
+        encoder_vocabulary = {}
+        decoder_vocabulary = {}
+        for i in range(self.encoder_tokenizer.vocab_size):
+            piece = self.encoder_tokenizer.ids_to_tokens([i])
+            piece = piece[0]
+            encoder_vocabulary[piece] = i + 1
+
+        for i in range(self.decoder_tokenizer.vocab_size):
+            piece = self.decoder_tokenizer.ids_to_tokens([i])
+            piece = piece[0]
+            decoder_vocabulary[piece] = i + 1
+
+        def get_encoder_vocab():
+            return encoder_vocabulary
+
+        def get_decoder_vocab():
+            return decoder_vocabulary
+
+        self.encoder_tokenizer.tokenizer.vocab_size = len(encoder_vocabulary)
+        self.encoder_tokenizer.tokenizer.get_vocab = get_encoder_vocab
+        self.encoder_tokenizer.tokenizer.all_special_tokens = self.encoder_tokenizer.special_token_to_id
+
+        self.decoder_tokenizer.tokenizer.vocab_size = len(decoder_vocabulary)
+        self.decoder_tokenizer.tokenizer.get_vocab = get_decoder_vocab
+        self.decoder_tokenizer.tokenizer.all_special_tokens = self.decoder_tokenizer.special_token_to_id
+
+        logging.info(
+            "Tokenizer {} and {} are initialized with {} tokens".format(
+                self.encoder_tokenizer.__class__.__name__,
+                self.decoder_tokenizer.__class__.__name__, 
+                self.tokenizer.vocab_size
+            )
+        )
+
 
     def _setup_monolingual_tokenizer(self, tokenizer_cfg: DictConfig):
         # Prevent tokenizer parallelism (unless user has explicitly set it)

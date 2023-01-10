@@ -182,6 +182,26 @@ def get_concat_bpe_dataset(
     )
     return dataset
 
+def get_dual_bpe_dataset(
+    config: dict, encoder_tokenizer: 'TokenizerSpec', decoder_tokenizer: 'TokenizerSpec',
+     augmentor: Optional['AudioAugment'] = None
+    ) -> audio_to_text.AudioToDualBPEDataset:
+    dataset = audio_to_text.AudioToDualBPEDataset(
+        manifest_filepath=config['manifest_filepath'],
+        encoder_tokenizer=encoder_tokenizer,
+        decoder_tokenizer=decoder_tokenizer,
+        sample_rate=config['sample_rate'],
+        int_values=config.get('int_values', False),
+        augmentor=augmentor,
+        max_duration=config.get('max_duration', None),
+        min_duration=config.get('min_duration', None),
+        max_utts=config.get('max_utts', 0),
+        trim=config.get('trim_silence', False),
+        use_start_end_token=config.get('use_start_end_token', True),
+        return_sample_id=config.get('return_sample_id', False),
+        channel_selector=config.get('channel_selector', None),
+    )
+    return dataset
 
 def get_bpe_dataset(
     config: dict, tokenizer: 'TokenizerSpec', augmentor: Optional['AudioAugmentor'] = None

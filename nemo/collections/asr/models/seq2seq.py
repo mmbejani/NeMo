@@ -2,13 +2,16 @@ from typing import List, Tuple
 
 import torch
 from torch.nn.functional import log_softmax
+from typing import Dict, List, Optional, Union
 from omegaconf import DictConfig, ListConfig, open_dict
 
+from nemo.collections.asr.data import audio_to_text_dataset
 from nemo.collections.asr.models import ASRModel
 from nemo.collections.asr.parts.mixins import ASRBPEMixin
 from nemo.collections.asr.losses.seq2seq import Seq2SeqLoss
 from nemo.collections.asr.metrics.seq2seq import Seq2SeqDecoder
 from nemo.collections.asr.metrics.wer_bpe import WERBPE
+from nemo.collections.asr.parts.preprocessing.perturb import process_augmentations
 from nemo.core.classes import Exportable
 from nemo.core.classes.mixins import AccessMixin
 from nemo.core.classes.common import typecheck
@@ -28,21 +31,24 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
 
         if 'tokenizer' not in cfg:
             raise ValueError("`cfg` must have `tokenizer` config to create a tokenizer !")
-        self._setup_tokenizer(cfg.tokenizer)
-        vocabulary = self.tokenizer.tokenizer.get_vocab()
+        self._setup_dual_tokenizer(cfg.tokenizer)
+        encoder_vocabulary = self.encoder_tokenizer.tokenizer.get_vocab()
+        decoder_vocabulary = self.decoder_tokenizer.tokenizer.get_vocab()
 
 
         with open_dict(cfg):
-            cfg.decoder.vocabulary = ListConfig(list(vocabulary.keys()))
+            cfg.encoder.vocabulary = ListConfig(list(encoder_vocabulary.keys()))
+            cfg.decoder.vocabulary = ListConfig(list(decoder_vocabulary.keys()))
 
-        num_classes = cfg.decoder["num_classes"]
-        if num_classes < 1:
+        decoder_num_classes = cfg.decoder["num_classes"]
+        if decoder_num_classes < 1:
             logging.info(
                 "\nReplacing placeholder number of classes ({}) with actual number of classes - {}".format(
-                    num_classes, len(vocabulary)
+                    decoder_num_classes, len(decoder_vocabulary)
                 )
             )
-            cfg.decoder["num_classes"] = len(vocabulary)
+            cfg.decoder["num_classes"] = len(decoder_vocabulary)
+        cfg.encoder["num_classes"] = len(encoder_vocabulary)
 
         self.world_size = 1
         if trainer is not None:
@@ -53,11 +59,11 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
         self.sequence_linear = Seq2SeqModel.from_config_dict(self._cfg.sequence_linear)
         self.log_softmax = torch.nn.LogSoftmax(dim=-1)
 
-        self.loss = Seq2SeqLoss(num_classes=num_classes)
+        self.loss = Seq2SeqLoss(num_classes=len(encoder_vocabulary))
 
         super().__init__(cfg=cfg, trainer=trainer)
 
-        self.decoding = Seq2SeqDecoder(tokenizer=self.tokenizer)
+        self.decoding = Seq2SeqDecoder(tokenizer=self.decoder_tokenizer)
         
         self._wer = WERBPE(
             decoding=self.decoding,
@@ -155,8 +161,47 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
     def transcribe(self, audio_bytes: List[bytes]) -> List[str]:
         pass
 
-    def setup_training_data(self, *args, **kwargs):
-        pass
+    def _setup_dataloader_from_config(self, config: Optional[Dict]):
+        if 'augmentor' in config:
+            augmentor = process_augmentations(config['augmentor'])
+        else:
+            augmentor = None
+
+        audio_to_text_dataset.inject_dataloader_value_from_model_config(self.cfg, config, key='sample_rate')
+        audio_to_text_dataset.inject_dataloader_value_from_model_config(self.cfg, config, key='labels')
+
+        shuffle = config['shuffle']
+        device = 'gpu' if torch.cuda.is_available() else 'cpu'
+        
+        if 'manifest_filepath' in config and config['manifest_filepath'] is None:
+            logging.warning(f"Could not load dataset as `manifest_filepath` was None. Provided config : {config}")
+            return None
+            
+        dataset = audio_to_text_dataset.get_dual_bpe_dataset(config=config, augmentor=augmentor)
+
+        if hasattr(dataset, 'collate_fn'):
+            collate_fn = dataset.collate_fn
+        else:
+            collate_fn = dataset.datasets[0].collate_fn
+
+        return torch.utils.data.DataLoader(
+            dataset=dataset,
+            batch_size=config['batch_size'],
+            collate_fn=collate_fn,
+            drop_last=config.get('drop_last', False),
+            shuffle=shuffle,
+            num_workers=config.get('num_workers', 0),
+            pin_memory=config.get('pin_memory', False),
+        )
+
+        
+
+    def setup_training_data(self, train_data_config: Optional[Union[DictConfig, Dict]]):
+        if 'shuffle' not in train_data_config:
+            train_data_config['shuffle'] = True
+        
+        self._update_dataset_config(dataset_name='train', config=train_data_config)
+        self._train_dl = self._setup_dataloader_from_config(config=train_data_config)
 
     def setup_validation_data(self, *args, **kwargs):
         pass

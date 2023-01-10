@@ -102,6 +102,78 @@ def _speech_collate_fn(batch, pad_id):
         sample_ids = torch.tensor(sample_ids, dtype=torch.int32)
         return audio_signal, audio_lengths, tokens, tokens_lengths, sample_ids
 
+class ASRDualTokenizerManifestProcessor:
+    """
+    Class that processes a manifest json file containing paths to audio files, transcripts, and durations (in seconds).
+    Each new line is a different sample. Example below:
+    {"audio_filepath": "/path/to/audio.wav", "text_filepath": "/path/to/audio.txt", "duration": 23.147}
+    ...
+    {"audio_filepath": "/path/to/audio.wav", "text": "the transcription", "offset": 301.75, "duration": 0.82, "utt":
+    "utterance_id", "ctm_utt": "en_4156", "side": "A"}
+    Args:
+        manifest_filepath: Path to manifest json as described above. Can be comma-separated paths.
+        encoder_parser: Str for a language specific preprocessor or a callable.
+        decoder_parser: Str for a language specific preprocessor or a callable.
+        max_duration: If audio exceeds this length, do not include in dataset.
+        min_duration: If audio is less than this length, do not include in dataset.
+        max_utts: Limit number of utterances.
+        bos_id: Id of beginning of sequence symbol to append if not None.
+        eos_id: Id of end of sequence symbol to append if not None.
+        pad_id: Id of pad symbol. Defaults to 0.
+    """
+    def __init__(
+        self,
+        manifest_filepath: str,
+        encoder_parser: Union[str, Callable],
+        decoder_parser: Union[str, Callable],
+        max_duration: Optional[float] = None,
+        min_duration: Optional[float] = None,
+        max_utts: int = 0,
+        bos_id: Optional[int] = None,
+        eos_id: Optional[int] = None,
+        pad_id: int = 0,
+    ):
+        self.encoder_parser = encoder_parser
+        self.decoder_parser = decoder_parser
+
+        self.collection = collections.ASRAudioDualText(
+            manifests_files=manifest_filepath,
+            encoder_parser=encoder_parser,
+            decoder_parser=decoder_parser,
+            min_duration=min_duration,
+            max_duration=max_duration,
+            max_number=max_utts
+        )
+
+        self.eos_id = eos_id
+        self.bos_id = bos_id
+        self.pad_id = pad_id
+
+    def process_text_by_id(self, index: int) -> Tuple[List[int], int]:
+        sample = self.collection[index]
+        return self.process_text_by_sample(sample)
+
+    def process_text_by_file_id(self, file_id: str) -> Tuple[List[int], int]:
+        manifest_idx = self.collection.mapping[file_id][0]
+        sample = self.collection[manifest_idx]
+        return self.process_text_by_sample(sample)
+
+    def process_text_by_sample(self, sample: collections.ASRAudioDualText.OUTPUT_TYPE) -> Tuple[Tuple[List[int], int]]:
+        et, etl = sample.encoder_text_tokens, len(sample.encoder_text_tokens)
+        dt, dtl = sample.encoder_text_tokens, len(sample.encoder_text_tokens)
+
+        def add_bos_eof(t, tl):
+            if self.bos_id is not None:
+                t = [self.bos_id] + t
+                tl += 1
+            if self.eos_id is not None:
+                t = t + [self.eos_id]
+                tl += 1
+            return t,tl
+        et,etl = add_bos_eof(et, etl)
+        dt,dtl = add_bos_eof(dt, dtl)
+
+        return (et, etl), (dt, dtl)
 
 class ASRManifestProcessor:
     """
@@ -344,6 +416,86 @@ def cache_datastore_manifests(
                 'initialized, please update data config to use `defer_setup = True`.'
             )
 
+class _AudioTextDualDataset(Dataset):
+    @property
+    def output_types(self) -> Optional[Dict[str, NeuralType]]:
+        """Returns definitions of module output ports.
+               """
+        return {
+            'audio_signal': NeuralType(('B', 'T'), AudioSignal()),
+            'a_sig_length': NeuralType(tuple('B'), LengthsType()),
+            'transcripts': NeuralType(('B', 'T'), LabelsType()),
+            'transcript_length': NeuralType(tuple('B'), LengthsType()),
+            'transcripts': NeuralType(('B', 'T'), LabelsType()),
+            'transcript_length': NeuralType(tuple('B'), LengthsType()),
+            'sample_id': NeuralType(tuple('B'), LengthsType(), optional=True),
+        }
+
+    def __init__(
+        self,
+        manifest_filepath: str,
+        encoder_parser: Union[str, Callable],
+        decoder_parser: Union[str, Callable],
+        sample_rate: int,
+        int_values: bool = False,
+        augmentor: 'nemo.collections.asr.parts.perturb.AudioAugmentor' = None,
+        max_duration: Optional[int] = None,
+        min_duration: Optional[int] = None,
+        max_utts: int = 0,
+        trim: bool = False,
+        bos_id: Optional[int] = None,
+        eos_id: Optional[int] = None,
+        pad_id: int = 0,
+        return_sample_id: bool = False,
+        channel_selector: Optional[ChannelSelectorType] = None,
+    ):
+        if type(manifest_filepath) == str:
+            manifest_filepath = manifest_filepath.split(",")
+
+        # If necessary, cache manifests and audio from object store
+        cache_datastore_manifests(manifest_filepaths=manifest_filepath, cache_audio=True)
+
+        self.manifest_processor = ASRDualTokenizerManifestProcessor(
+            manifest_filepath=manifest_filepath,
+            encoder_parser=encoder_parser,
+            decoder_parser=decoder_parser,
+            max_duration=max_duration,
+            min_duration=min_duration,
+            max_utts=max_utts,
+            bos_id=bos_id,
+            eos_id=eos_id,
+            pad_id=pad_id,
+        )
+        self.featurizer = WaveformFeaturizer(sample_rate=sample_rate, int_values=int_values, augmentor=augmentor)
+        self.trim = trim
+        self.return_sample_id = return_sample_id
+        self.channel_selector = channel_selector
+
+    def get_manifest_sample(self, sample_id):
+        return self.manifest_processor.collection[sample_id]
+
+    def __getitem__(self, index):
+        sample = self.manifest_processor.collection[index]
+        offset = sample.offset
+
+        if offset is None:
+            offset = 0
+
+        features = self.featurizer.process(
+            sample.audio_file,
+            offset=offset,
+            duration=sample.duration,
+            trim=self.trim,
+            orig_sr=sample.orig_sr,
+            channel_selector=self.channel_selector,
+        )
+        f, fl = features, torch.tensor(features.shape[0]).long()
+
+        (et, etl), (dt, dtl) = self.manifest_processor.process_text_by_sample(sample=sample)
+
+        output = f, fl, torch.tensor(et).long(), torch.tensor(etl).long(), torch.tensor(dt).long(), torch.tensor(dtl).long()
+        return output
+
 
 class _AudioTextDataset(Dataset):
     """
@@ -456,7 +608,6 @@ class _AudioTextDataset(Dataset):
     def _collate_fn(self, batch):
         return _speech_collate_fn(batch, pad_id=self.manifest_processor.pad_id)
 
-
 class AudioToCharDataset(_AudioTextDataset):
     """
     Dataset that loads tensors via a json file containing paths to audio
@@ -542,6 +693,129 @@ class AudioToCharDataset(_AudioTextDataset):
             bos_id=bos_id,
             eos_id=eos_id,
             pad_id=pad_id,
+            return_sample_id=return_sample_id,
+            channel_selector=channel_selector,
+        )
+
+
+class AudioToDualBPEDataset(_AudioTextDualDataset):
+    """
+    Dataset that loads tensors via a json file containing paths to audio
+    files, transcripts, and durations (in seconds). Each new line is a
+    different sample. Example below:
+    {"audio_filepath": "/path/to/audio.wav", "text_filepath":
+    "/path/to/audio.txt", "duration": 23.147}
+    ...
+    {"audio_filepath": "/path/to/audio.wav", "text": "the
+    transcription", "offset": 301.75, "duration": 0.82, "utt":
+    "utterance_id", "ctm_utt": "en_4156", "side": "A"}
+
+    In practice, the dataset and manifest used for character encoding and byte pair encoding
+    are exactly the same. The only difference lies in how the dataset tokenizes the text in
+    the manifest.
+
+    Args:
+        manifest_filepath: Path to manifest json as described above. Can
+            be comma-separated paths.
+        encoder_tokenizer: A subclass of the Tokenizer wrapper found in the common collection,
+            nemo.collections.common.tokenizers.TokenizerSpec. ASR Models support a subset of
+            all available tokenizers. This tokenizer is specified for Encoder module.
+        decoder_tokenizer: A subclass of the Tokenizer wrapper found in the common collection,
+            nemo.collections.common.tokenizers.TokenizerSpec. ASR Models support a subset of
+            all available tokenizers. This tokenizer is specified for coder module.
+        sample_rate (int): Sample rate to resample loaded audio to
+        int_values (bool): If true, load samples as 32-bit integers. Defauts to False.
+        augmentor (nemo.collections.asr.parts.perturb.AudioAugmentor): An AudioAugmentor
+            object used to augment loaded audio
+        max_duration: If audio exceeds this length, do not include in dataset
+        min_duration: If audio is less than this length, do not include
+            in dataset
+        max_utts: Limit number of utterances
+        trim: Whether to trim silence segments
+        use_start_end_token: Boolean which dictates whether to add [BOS] and [EOS]
+            tokens to beginning and ending of speech respectively.
+        return_sample_id (bool): whether to return the sample_id as a part of each sample
+        channel_selector (int | Iterable[int] | str): select a single channel or a subset of channels from multi-channel audio. If set to `'average'`, it performs averaging across channels. Disabled if set to `None`. Defaults to `None`. Uses zero-based indexing.
+    """
+
+    @property
+    def output_types(self) -> Optional[Dict[str, NeuralType]]:
+        """Returns definitions of module output ports.
+               """
+        return {
+            'audio_signal': NeuralType(('B', 'T'), AudioSignal()),
+            'a_sig_length': NeuralType(tuple('B'), LengthsType()),
+            'encoder_transcripts': NeuralType(('B', 'T'), LabelsType()),
+            'encoder_transcript_length': NeuralType(tuple('B'), LengthsType()),
+            'decoder_transcripts': NeuralType(('B', 'T'), LabelsType()),
+            'decoder_transcript_length': NeuralType(tuple('B'), LengthsType()),
+            'sample_id': NeuralType(tuple('B'), LengthsType(), optional=True),
+        }
+
+
+    def __init__(
+        self,
+        manifest_filepath: str,
+        encoder_tokenizer: 'nemo.collections.common.tokenizers.TokenizerSpec',
+        decoder_tokenizer: 'nemo.collections.common.tokenizers.TokenizerSpec',
+        sample_rate: int,
+        int_values: bool = False,
+        augmentor: 'nemo.collections.asr.parts.perturb.AudioAugmentor' = None,
+        max_duration: Optional[int] = None,
+        min_duration: Optional[int] = None,
+        max_utts: int = 0,
+        trim: bool = False,
+        use_start_end_token: bool = True,
+        return_sample_id: bool = False,
+        channel_selector: Optional[ChannelSelectorType] = None,
+    ):
+        if use_start_end_token and hasattr(decoder_tokenizer, "bos_id") and decoder_tokenizer.bos_id > 0:
+            bos_id = decoder_tokenizer.bos_id
+        else:
+            bos_id = None
+
+        if use_start_end_token and hasattr(decoder_tokenizer, "eos_id") and decoder_tokenizer.eos_id > 0:
+            eos_id = decoder_tokenizer.eos_id
+        else:
+            eos_id = None
+
+        if hasattr(decoder_tokenizer, "pad_id") and decoder_tokenizer.pad_id > 0:
+            pad_id = decoder_tokenizer.pad_id
+        else:
+            pad_id = 0
+
+        class TokenizerWrapper:
+            def __init__(self, tokenizer):
+                if isinstance(tokenizer, tokenizers.aggregate_tokenizer.AggregateTokenizer):
+                    self.is_aggregate = True
+                else:
+                    self.is_aggregate = False
+                self._tokenizer = tokenizer
+
+            def __call__(self, *args):
+                if isinstance(args[0], List) and self.is_aggregate:
+                    t = []
+                    for span in args[0]:
+                        t.extend(self._tokenizer.text_to_ids(span['str'], span['lang']))
+                    return t
+
+                t = self._tokenizer.text_to_ids(*args)
+                return t
+
+        super().__init__(
+            manifest_filepath=manifest_filepath,
+            encoder_parser=TokenizerWrapper(encoder_tokenizer),
+            decoder_parser=TokenizerWrapper(decoder_tokenizer),
+            sample_rate=sample_rate,
+            int_values=int_values,
+            augmentor=augmentor,
+            max_duration=max_duration,
+            min_duration=min_duration,
+            max_utts=max_utts,
+            bos_id=bos_id,
+            eos_id=eos_id,
+            pad_id=pad_id,
+            trim=trim,
             return_sample_id=return_sample_id,
             channel_selector=channel_selector,
         )
