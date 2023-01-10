@@ -21,6 +21,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Tuple, Union
 import braceexpand
 import numpy as np
 import torch
+from torch.nn.utils.rnn import pad_sequence
 import webdataset as wd
 from torch.utils.data import ChainDataset
 from tqdm import tqdm
@@ -47,6 +48,54 @@ __all__ = [
     'TarredAudioToCharDataset',
     'TarredAudioToBPEDataset',
 ]
+
+def _speech_dual_text_collate_fn(batch, pad_id):
+    packed_batch = list(zip(*batch))
+
+    _, audio_lengths, _, encoder_tokens_lengths, _, decoder_tokens_lengths = packed_batch
+
+    max_audio_len = 0
+    has_audio = audio_lengths[0] is not None
+    if has_audio:
+        max_audio_len = max(audio_lengths).item()
+    max_encoder_tokens_len = max(encoder_tokens_lengths).item()
+    max_decoder_tokens_len = max(decoder_tokens_lengths).item()
+
+    audio_signal, encoder_tokens, decoder_tokens = [], []
+    for b in batch:
+        sig, sig_len, encoder_tokens_i, encoder_tokens_i_len, decoder_tokens_i, decoder_tokens_i_len = b
+        if has_audio:
+            sig_len = sig_len.item()
+            if sig_len < max_audio_len:
+                pad = (0, max_audio_len - sig_len)
+                sig = torch.nn.functional.pad(sig, pad)
+            audio_signal.append(sig)
+        encoder_tokens_i_len = encoder_tokens_i_len.item()
+        decoder_tokens_i_len = decoder_tokens_i_len.item()
+        if encoder_tokens_i_len < max_encoder_tokens_len:
+            pad = (0, max_encoder_tokens_len - encoder_tokens_i_len)
+            encoder_tokens_i = torch.nn.functional.pad(encoder_tokens_i, pad, value=pad_id)
+        if decoder_tokens_i_len < max_decoder_tokens_len:
+            pad = (0, max_decoder_tokens_len - decoder_tokens_i_len)
+            decoder_tokens_i = torch.nn.functional.pad(decoder_tokens_i, pad, value=pad_id)
+        encoder_tokens.append(encoder_tokens_i)
+        decoder_tokens.append(decoder_tokens_i)
+
+    if has_audio:
+        audio_signal = torch.stack(audio_signal)
+        audio_lengths = torch.stack(audio_lengths)
+    else:
+        audio_signal, audio_lengths = None, None
+    encoder_tokens = torch.stack(encoder_tokens)
+    decoder_tokens = torch.stack(decoder_tokens)
+    encoder_tokens_lengths = torch.stack(encoder_tokens_lengths)
+    decoder_tokens_lengths = torch.stack(decoder_tokens_lengths)
+    return (audio_signal, 
+           audio_lengths, 
+           encoder_tokens, 
+           encoder_tokens_lengths, 
+           decoder_tokens, 
+           decoder_tokens_lengths)
 
 
 def _speech_collate_fn(batch, pad_id):
@@ -495,6 +544,12 @@ class _AudioTextDualDataset(Dataset):
 
         output = f, fl, torch.tensor(et).long(), torch.tensor(etl).long(), torch.tensor(dt).long(), torch.tensor(dtl).long()
         return output
+
+    def __len__(self):
+        return len(self.manifest_processor.collection)
+
+    def _collate_fn(self, batch):
+        return _speech_dual_text_collate_fn(batch, pad_id=self.manifest_processor.pad_id)
 
 
 class _AudioTextDataset(Dataset):
