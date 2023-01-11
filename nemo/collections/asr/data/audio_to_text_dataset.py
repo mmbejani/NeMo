@@ -197,7 +197,6 @@ def get_dual_bpe_dataset(
         min_duration=config.get('min_duration', None),
         max_utts=config.get('max_utts', 0),
         trim=config.get('trim_silence', False),
-        use_start_end_token=config.get('use_start_end_token', True),
         return_sample_id=config.get('return_sample_id', False),
         channel_selector=config.get('channel_selector', None),
     )

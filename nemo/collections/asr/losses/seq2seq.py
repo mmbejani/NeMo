@@ -6,9 +6,8 @@ from nemo.collections.common.losses import CrossEntropyLoss
 
 class Seq2SeqLoss(Serialization, Typing):
 
-    def __init__(self, num_classes, ctc_weight = 0.1, zero_infinity=False, reduction='mean_batch'):
-        self._blank = num_classes
-        # Don't forget to properly call base constructor
+    def __init__(self, blank_index=0, ctc_weight = 0.1, zero_infinity=False, reduction='mean_batch'):
+
         if reduction not in ['none', 'mean', 'sum', 'mean_batch', 'mean_volume']:
             raise ValueError('`reduction` must be one of [mean, sum, mean_batch, mean_volume]')
 
@@ -20,8 +19,8 @@ class Seq2SeqLoss(Serialization, Typing):
             ctc_reduction = reduction
             self._apply_reduction = False
         
-        self.ctc_loss = nn.CTCLoss(blank=self._blank, reduction=ctc_reduction, zero_infinity=zero_infinity)
-        self.seq_loss = CrossEntropyLoss()
+        self.ctc_loss = nn.CTCLoss(blank=blank_index, reduction=ctc_reduction, zero_infinity=zero_infinity)
+        self.seq_loss = CrossEntropyLoss(logits_ndim=3)
         self.ctc_weight = ctc_weight
 
 
@@ -34,7 +33,8 @@ class Seq2SeqLoss(Serialization, Typing):
         return losses
 
     @typecheck()
-    def forward(self, log_probs, logits, targets, input_lengths, target_lengths):
+    def forward(self, log_probs, logits, encoder_targets, decoder_targets, 
+                input_lengths, encoder_target_lengths, decoder_target_lengths):
         """Linear combiniation of two losses, CTCLoss and Autoregressive
            B: Batch size
            T: Time step real output
@@ -46,9 +46,11 @@ class Seq2SeqLoss(Serialization, Typing):
         Args:
             log_probs (torch.Tensor): logSoftmax output of the ctc portion of the model with shape [B, T', C]
             logits (torch.Tensor): Softmax output of the autoregressive portion of the model with shape [B, T, C]
-            targets (torch.LongTensor): The target tokens [B, T]
+            encoder_targets (torch.LongTensor): The target tokens [B, T]
+            decoder_targets (torch.LongTensor): The target tokens [B, T]
             input_lengths (torch.LongTensor): The length of input signal [B, T"]
-            target_lengths (torch.LongTensor): The length of target signal [B, T]
+            encoder_target_lengths (torch.LongTensor): The length of target signal [B, T]
+            decoder_target_lengths (torch.LongTensor): The length of target signal [B, T]
 
         Returns:
             torch.Tensor: The value of loss function
@@ -56,20 +58,22 @@ class Seq2SeqLoss(Serialization, Typing):
         # override forward implementation
         # custom logic, if necessary
         input_lengths = input_lengths.long()
-        target_lengths = target_lengths.long()
-        targets = targets.long()
+        encoder_target_lengths = encoder_target_lengths.long()
+        decoder_target_lengths = decoder_target_lengths.long()
+
+        encoder_targets = encoder_targets.long()
+        decoder_targets = decoder_targets.long()
         # here we transpose because we expect [B, T, D] while PyTorch assumes [T, B, D]
         # Pytroch assumption is better :)
         log_probs = log_probs.transpose(1, 0)
-        seq_loss = self.seq_loss(logits, targets)
+        seq_loss = self.seq_loss(logits=logits, labels=decoder_targets)
         ctc_loss = self.ctc_loss(log_probs=log_probs, 
-                             targets=targets,
+                             targets=encoder_targets,
                              input_lengths=input_lengths, 
-                             target_lengths=target_lengths)
+                             target_lengths=encoder_target_lengths)
+
+        ctc_loss = self.reduce(ctc_loss, encoder_target_lengths)
+
         loss = seq_loss + self.ctc_weight * ctc_loss
 
-        if self._apply_reduction:
-            loss = self.reduce(loss, target_lengths)
-            seq_loss = self.reduce(seq_loss, target_lengths)
-            ctc_loss = self.reduce(ctc_loss, target_lengths)
         return loss, seq_loss, ctc_loss

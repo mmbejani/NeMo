@@ -24,44 +24,31 @@ __all__ = ["Seq2SeqModel", "Seq2SeqModelWithLM"]
 class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
 
     def __init__(self, cfg: DictConfig, trainer: Trainer = None):
-        super().__init__(cfg, trainer)
+        self.cfg = model_utils.convert_model_config_to_dict_config(cfg)
 
-        cfg = model_utils.convert_model_config_to_dict_config(cfg)
-        cfg = model_utils.maybe_update_config_version(cfg)
-
-        if 'tokenizer' not in cfg:
+        if 'encoder_tokenizer' not in cfg and 'decoder_tokenizer' not in cfg:
             raise ValueError("`cfg` must have `tokenizer` config to create a tokenizer !")
-        self._setup_dual_tokenizer(cfg.tokenizer)
+        self._setup_dual_tokenizer(cfg.encoder_tokenizer, cfg.decoder_tokenizer)
         encoder_vocabulary = self.encoder_tokenizer.tokenizer.get_vocab()
-        decoder_vocabulary = self.decoder_tokenizer.tokenizer.get_vocab()
-
-
-        with open_dict(cfg):
-            cfg.encoder.vocabulary = ListConfig(list(encoder_vocabulary.keys()))
-            cfg.decoder.vocabulary = ListConfig(list(decoder_vocabulary.keys()))
-
-        decoder_num_classes = cfg.decoder["num_classes"]
-        if decoder_num_classes < 1:
-            logging.info(
-                "\nReplacing placeholder number of classes ({}) with actual number of classes - {}".format(
-                    decoder_num_classes, len(decoder_vocabulary)
-                )
-            )
-            cfg.decoder["num_classes"] = len(decoder_vocabulary)
-        cfg.encoder["num_classes"] = len(encoder_vocabulary)
 
         self.world_size = 1
+        self.max_seq_len = self.cfg.get('max_len_seq', 100)
         if trainer is not None:
             self.world_size = trainer.world_size
-        self.preprocessor = Seq2SeqModel.from_config_dict(self._cfg.preprocessor)
-        self.encoder = Seq2SeqModel.from_config_dict(self._cfg.encoder)
-        self.ctc_linear = Seq2SeqModel.from_config_dict(self._cfg.ctc_linear)
-        self.sequence_linear = Seq2SeqModel.from_config_dict(self._cfg.sequence_linear)
-        self.log_softmax = torch.nn.LogSoftmax(dim=-1)
-
-        self.loss = Seq2SeqLoss(num_classes=len(encoder_vocabulary))
 
         super().__init__(cfg=cfg, trainer=trainer)
+
+        self.preprocessor = Seq2SeqModel.from_config_dict(self.cfg.preprocessor)
+        if 'spec_augmentation' in self.cfg:
+            self.spec_augmentation = Seq2SeqModel.from_config_dict(self.cfg.spec_augmentation)
+        self.encoder = Seq2SeqModel.from_config_dict(self.cfg.encoder)
+        self.decoder = Seq2SeqModel.from_config_dict(self.cfg.decoder)
+        self.ctc_linear = Seq2SeqModel.from_config_dict(self.cfg.ctc_linear)
+        self.decoder_embedding = Seq2SeqModel.from_config_dict(self.cfg.decoder_embedding)
+        self.decoder_embedding.to(self.device)
+        self.sequence_linear = Seq2SeqModel.from_config_dict(self.cfg.sequence_linear)
+        self.log_softmax = torch.nn.LogSoftmax(dim=-1)
+        self.loss = Seq2SeqLoss()
 
         self.decoding = Seq2SeqDecoder(tokenizer=self.decoder_tokenizer)
         
@@ -69,7 +56,7 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
             decoding=self.decoding,
             use_cer=self._cfg.get('use_cer', False),
             dist_sync_on_step=True,
-            log_prediction=self._cfg.get("log_prediction", False),
+            log_prediction=self._cfg.get("log_prediction", True),
         )
 
 
@@ -78,13 +65,16 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
         if AccessMixin.is_access_enabled():
             AccessMixin.reset_registry(self)
 
-        signal, signal_len, transcript, transcript_len = batch
+        signal, signal_len, encoder_transcript, encoder_transcript_len, decoder_transcript, decoder_transcript_len = batch
         seq_output, ctc_output, encoded_len = self.forward(input_signal=signal, 
                                                            input_signal_length=signal_len, 
-                                                           target_length=transcript_len)
-        loss_value, seq_loss, ctc_loss = self.loss(log_probs=ctc_output, logits=seq_output, 
-                                                   targets=transcript, inputs_len=encoded_len,
-                                                   targets_len=transcript_len)
+                                                           target_length=decoder_transcript_len)
+        loss_value, seq_loss, ctc_loss = self.loss.forward(log_probs=ctc_output, logits=seq_output, 
+                                                   encoder_targets=encoder_transcript, 
+                                                   decoder_targets=decoder_transcript, 
+                                                   input_lengths=encoded_len,
+                                                   encoder_target_lengths=encoder_transcript_len,
+                                                   decoder_target_lengths=decoder_transcript_len)
 
         if AccessMixin.is_access_enabled():
             AccessMixin.reset_registry(self)
@@ -105,8 +95,8 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
         if (batch_idx + 1) % log_every_n_steps == 0:
             self._wer.update(
                 predictions=torch.nn.functional.softmax(seq_output, dim=-1),
-                targets=transcript,
-                target_lengths=transcript_len,
+                targets=decoder_transcript,
+                target_lengths=decoder_transcript_len,
                 predictions_lengths=encoded_len,
             )
             wer, _, _ = self._wer.compute()
@@ -137,20 +127,33 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
 
         if self.spec_augmentation is not None and self.training:
             processed_signal = self.spec_augmentation(input_spec=processed_signal, length=processed_signal_length)
-
-        encoder_output = self.encoder(processed_signal, processed_signal_length)
+         
+        encoder_output = self.encoder(audio_signal=processed_signal, length=processed_signal_length)
         encoded, encoded_len = encoder_output[0], encoder_output[1]
+        encoded = encoded.transpose(1,2)
         ctc_prediction = self.ctc_linear(encoded)
+        ctc_prediction = self.log_softmax(ctc_prediction)
         logits_list = []
+        
+        batch_size = encoded.size(0)
+        bos_tokens = torch.ones(size=[batch_size, 1], dtype=torch.long).to(self.device) \
+                    * self.decoder_tokenizer.bos_id
+        step_length = torch.ones(batch_size, dtype=torch.long)
+        output_tensor = self.decoder_embedding(bos_tokens)
 
-        bos_tokens = torch.ones(size=[encoded.size(1), 1], dtype=torch.long) * self.bos_id
-        output_tensor = self.embedding(bos_tokens)
-        for i in range(self.max_seq_len if target_length is None else target_length):
-            decoder_output = self.decoder(output_tensor, encoded, encoded_len)
+        encoder_mask = self._mask_generator(encoded_len)
+        for i in range(self.max_seq_len if target_length is None else torch.max(target_length).item()):
+            decoder_mask = self._mask_generator(step_length)
+            decoder_output = self.decoder(output_tensor, decoder_mask, encoded, encoder_mask)
             logits = self.sequence_linear(decoder_output)[:, -1].detach()
-            logits_list.append(logits)
+            logits_list.append(logits.unsqueeze(1))
             next_tokens = torch.argmax(logits, dim=-1)
-            output_tensor = torch.cat([output_tensor, self.embedding(next_tokens)], dim=1)
+            output_tensor = torch.cat([output_tensor, self.decoder_embedding(next_tokens).unsqueeze(1)], dim=1)
+            if i == self.max_seq_len - 1:
+                logging.warning(f'The length of generated sequences exceeds the maximum length of {self.max_seq_len}')
+            for i in range(batch_size):
+                if step_length[i] < target_length[i]:
+                    step_length[i] += 1
         
         logits = torch.cat(logits_list, dim=1)
 
@@ -171,13 +174,12 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
         audio_to_text_dataset.inject_dataloader_value_from_model_config(self.cfg, config, key='labels')
 
         shuffle = config['shuffle']
-        device = 'gpu' if torch.cuda.is_available() else 'cpu'
         
         if 'manifest_filepath' in config and config['manifest_filepath'] is None:
             logging.warning(f"Could not load dataset as `manifest_filepath` was None. Provided config : {config}")
             return None
             
-        dataset = audio_to_text_dataset.get_dual_bpe_dataset(config=config, augmentor=augmentor)
+        dataset = audio_to_text_dataset.get_dual_bpe_dataset(config=config, augmentor=augmentor, encoder_tokenizer=self.encoder_tokenizer, decoder_tokenizer=self.decoder_tokenizer)
 
         if hasattr(dataset, 'collate_fn'):
             collate_fn = dataset.collate_fn
@@ -215,6 +217,23 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
 
         self._update_dataset_config(dataset_name='test', config=test_data_config)
         self._test_dl = self._setup_dataloader_from_config(config=test_data_config)
+
+    def _mask_generator(self, batch_lengths: torch.Tensor) -> torch.Tensor:
+        """Generate mask respect to the given batch_lengths
+        B : batch size
+
+        Args:
+            batch_lengths (torch.Tensor): lengths of each batch with shape [B]
+
+        Returns:
+            torch.Tensor: generated mask
+        """
+        max_len = torch.max(batch_lengths)
+        mask = torch.zeros(batch_lengths.size(0), max_len).long()
+        for i in range(batch_lengths.size(0)):
+            mask[i,:batch_lengths[i]] = torch.ones(batch_lengths[i]).long()
+        return mask.to(self.device)
+
 
 
 

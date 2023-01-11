@@ -61,7 +61,7 @@ def _speech_dual_text_collate_fn(batch, pad_id):
     max_encoder_tokens_len = max(encoder_tokens_lengths).item()
     max_decoder_tokens_len = max(decoder_tokens_lengths).item()
 
-    audio_signal, encoder_tokens, decoder_tokens = [], []
+    audio_signal, encoder_tokens, decoder_tokens = [], [], []
     for b in batch:
         sig, sig_len, encoder_tokens_i, encoder_tokens_i_len, decoder_tokens_i, decoder_tokens_i_len = b
         if has_audio:
@@ -178,7 +178,6 @@ class ASRDualTokenizerManifestProcessor:
         max_duration: Optional[float] = None,
         min_duration: Optional[float] = None,
         max_utts: int = 0,
-        bos_id: Optional[int] = None,
         eos_id: Optional[int] = None,
         pad_id: int = 0,
     ):
@@ -195,7 +194,6 @@ class ASRDualTokenizerManifestProcessor:
         )
 
         self.eos_id = eos_id
-        self.bos_id = bos_id
         self.pad_id = pad_id
 
     def process_text_by_id(self, index: int) -> Tuple[List[int], int]:
@@ -211,17 +209,9 @@ class ASRDualTokenizerManifestProcessor:
         et, etl = sample.encoder_text_tokens, len(sample.encoder_text_tokens)
         dt, dtl = sample.encoder_text_tokens, len(sample.encoder_text_tokens)
 
-        def add_bos_eof(t, tl):
-            if self.bos_id is not None:
-                t = [self.bos_id] + t
-                tl += 1
-            if self.eos_id is not None:
-                t = t + [self.eos_id]
-                tl += 1
-            return t,tl
-        et,etl = add_bos_eof(et, etl)
-        dt,dtl = add_bos_eof(dt, dtl)
-
+        dt = dt + [self.eos_id]
+        dtl += 1
+        
         return (et, etl), (dt, dtl)
 
 class ASRManifestProcessor:
@@ -492,7 +482,6 @@ class _AudioTextDualDataset(Dataset):
         min_duration: Optional[int] = None,
         max_utts: int = 0,
         trim: bool = False,
-        bos_id: Optional[int] = None,
         eos_id: Optional[int] = None,
         pad_id: int = 0,
         return_sample_id: bool = False,
@@ -511,7 +500,6 @@ class _AudioTextDualDataset(Dataset):
             max_duration=max_duration,
             min_duration=min_duration,
             max_utts=max_utts,
-            bos_id=bos_id,
             eos_id=eos_id,
             pad_id=pad_id,
         )
@@ -820,19 +808,10 @@ class AudioToDualBPEDataset(_AudioTextDualDataset):
         min_duration: Optional[int] = None,
         max_utts: int = 0,
         trim: bool = False,
-        use_start_end_token: bool = True,
         return_sample_id: bool = False,
         channel_selector: Optional[ChannelSelectorType] = None,
     ):
-        if use_start_end_token and hasattr(decoder_tokenizer, "bos_id") and decoder_tokenizer.bos_id > 0:
-            bos_id = decoder_tokenizer.bos_id
-        else:
-            bos_id = None
-
-        if use_start_end_token and hasattr(decoder_tokenizer, "eos_id") and decoder_tokenizer.eos_id > 0:
-            eos_id = decoder_tokenizer.eos_id
-        else:
-            eos_id = None
+        eos_id = decoder_tokenizer.eos_id
 
         if hasattr(decoder_tokenizer, "pad_id") and decoder_tokenizer.pad_id > 0:
             pad_id = decoder_tokenizer.pad_id
@@ -867,7 +846,6 @@ class AudioToDualBPEDataset(_AudioTextDualDataset):
             max_duration=max_duration,
             min_duration=min_duration,
             max_utts=max_utts,
-            bos_id=bos_id,
             eos_id=eos_id,
             pad_id=pad_id,
             trim=trim,

@@ -56,37 +56,21 @@ class ASRBPEMixin(ABC):
             raise ValueError("`tokenizer.type` cannot be None")
         elif tokenizer_type.lower() == 'agg':
             self._setup_aggregate_tokenizer(tokenizer_cfg)
-        elif tokenizer_type.lower() == 'dual':
-            self._setup_dual_tokenizer(tokenizer_cfg)
         else:
             self._setup_monolingual_tokenizer(tokenizer_cfg)
 
-    def _setup_dual_tokenizer(self, tokenizer_cfg: DictConfig):
-        self.tokenizer_cfg = OmegaConf.to_container(tokenizer_cfg, resolve=True)  # type: dict
-        self.tokenizer_encoder_dir = self.tokenizer_cfg.pop('encoder_dir')
-        self.tokenizer_decoder_dir = self.tokenizer_cfg.pop('decoder_dir')
-        self.tokenizer_type = self.tokenizer_cfg.pop('type').lower()
-
-        if hasattr(self, 'cfg') and 'tokenizer' in self.cfg:
-            self.cfg.tokenizer_encoder.dir = self.tokenizer_encoder_dir
-            self.cfg.tokenizer_decoder.dir = self.tokenizer_decoder_dir
-            self.cfg.tokenizer.type = self.tokenizer_type
+    def _setup_dual_tokenizer(self, encoder_tokenizer_cfg: DictConfig, decoder_tokenizer_cfg: DictConfig):
+        self.encoder_tokenizer_cfg = OmegaConf.to_container(encoder_tokenizer_cfg, resolve=True)  # type: dict
+        self.decoder_tokenizer_cfg = OmegaConf.to_container(decoder_tokenizer_cfg, resolve=True)  # type: dict
+        self.tokenizer_encoder_dir = self.encoder_tokenizer_cfg.pop('dir')
+        self.tokenizer_decoder_dir = self.decoder_tokenizer_cfg.pop('dir')
+        self.tokenizer_type = self.encoder_tokenizer_cfg.pop('type').lower()
 
         if self.tokenizer_type not in 'bpe':
             raise ValueError("`tokenizer.type` must be `bpe` for SentencePiece tokenizer")
 
-        if 'encoder_model_path' in self.tokenizer_cfg:
-            encoder_model_path = self.tokenizer_cfg.get('encoder_model_path')
-        if 'decoder_model_path' in self.tokenizer_cfg:
-            decoder_model_path = self.tokenizer_cfg.get('decoder_model_path')
-        else:
-            encoder_model_path = os.path.join(self.tokenizer_dir, 'tokenizer.model')
-            decoder_model_path = os.path.join(self.tokenizer_dir, 'tokenizer.model')
-        self.encoder_model_path = encoder_model_path
-        self.decoder_model_path = decoder_model_path
-
-        self.encoder_tokenizer = tokenizers.SentencePieceTokenizer(model_path=self.encoder_model_path)
-        self.decoder_tokenizer = tokenizers.SentencePieceTokenizer(model_path=self.decoder_model_path)
+        self.encoder_tokenizer = tokenizers.SentencePieceTokenizer(model_path=self.tokenizer_encoder_dir)
+        self.decoder_tokenizer = tokenizers.SentencePieceTokenizer(model_path=self.tokenizer_decoder_dir)
 
         encoder_vocabulary = {}
         decoder_vocabulary = {}
@@ -115,10 +99,11 @@ class ASRBPEMixin(ABC):
         self.decoder_tokenizer.tokenizer.all_special_tokens = self.decoder_tokenizer.special_token_to_id
 
         logging.info(
-            "Tokenizer {} and {} are initialized with {} tokens".format(
+            "Tokenizer {} and {} are initialized with {} and {} tokens respectively".format(
                 self.encoder_tokenizer.__class__.__name__,
                 self.decoder_tokenizer.__class__.__name__, 
-                self.tokenizer.vocab_size
+                self.encoder_tokenizer.vocab_size,
+                self.decoder_tokenizer.vocab_size
             )
         )
 

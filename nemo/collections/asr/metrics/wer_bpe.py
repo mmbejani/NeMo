@@ -198,6 +198,88 @@ class CTCBPEDecoding(AbstractCTCDecoding):
         return token_list
 
 
+class WERS2S(Metric):
+    full_state_update: bool = True
+
+    def __init__(
+        self,
+        decoding: CTCBPEDecoding,
+        use_cer=False,
+        log_prediction=True,
+        fold_consecutive=True,
+        dist_sync_on_step=False,
+    ):
+        super().__init__(dist_sync_on_step=dist_sync_on_step, compute_on_step=False)
+        self.decoding = decoding
+        self.tokenizer = self.decoding.tokenizer
+        self.blank_id = self.decoding.tokenizer.tokenizer.vocab_size
+        self.use_cer = use_cer
+        self.log_prediction = log_prediction
+        self.fold_consecutive = fold_consecutive
+
+        self.add_state("scores", default=torch.tensor(0), dist_reduce_fx='sum', persistent=False)
+        self.add_state("words", default=torch.tensor(0), dist_reduce_fx='sum', persistent=False)
+
+    def update(
+        self,
+        predictions: torch.Tensor,
+        targets: torch.Tensor,
+        target_lengths: torch.Tensor,
+        predictions_lengths: torch.Tensor = None,
+    ):
+        """
+        Updates metric state.
+        Args:
+            predictions: an integer torch.Tensor of shape ``[Batch, Time, {Vocabulary}]`` (if ``batch_dim_index == 0``) or
+                ``[Time, Batch]`` (if ``batch_dim_index == 1``)
+            targets: an integer torch.Tensor of shape ``[Batch, Time]`` (if ``batch_dim_index == 0``) or
+                ``[Time, Batch]`` (if ``batch_dim_index == 1``)
+            target_lengths: an integer torch.Tensor of shape ``[Batch]``
+            predictions_lengths: an integer torch.Tensor of shape ``[Batch]``
+        """
+        words = 0
+        scores = 0
+        references = []
+        with torch.no_grad():
+            targets_cpu_tensor = targets.long().cpu()
+            tgt_lenths_cpu_tensor = target_lengths.long().cpu()
+
+            # iterate over batch
+            for ind in range(targets_cpu_tensor.shape[0]):
+                tgt_len = tgt_lenths_cpu_tensor[ind].item()
+                target = targets_cpu_tensor[ind][:tgt_len].numpy().tolist()
+                reference = self.decoding.decode_tokens_to_str(target)
+                references.append(reference)
+
+            hypotheses, _ = self.decoding.ctc_decoder_predictions_tensor(
+                predictions, predictions_lengths, fold_consecutive=self.fold_consecutive
+            )
+
+        if self.log_prediction:
+            logging.info(f"\n")
+            logging.info(f"reference:{references[0]}")
+            logging.info(f"predicted:{hypotheses[0]}")
+
+        for h, r in zip(hypotheses, references):
+            if self.use_cer:
+                h_list = list(h)
+                r_list = list(r)
+            else:
+                h_list = h.split()
+                r_list = r.split()
+            words += len(r_list)
+            # Compute Levenstein's distance
+            scores += editdistance.eval(h_list, r_list)
+
+        self.scores = torch.tensor(int(scores), device=self.scores.device, dtype=self.scores.dtype)
+        self.words = torch.tensor(int(words), device=self.words.device, dtype=self.words.dtype)
+        # return torch.tensor([scores, words]).to(predictions.device)
+
+    def compute(self):
+        scores = self.scores.detach().float()
+        words = self.words.detach().float()
+        return scores / words, scores, words
+
 class WERBPE(Metric):
     """
     This metric computes numerator and denominator for Overall Word Error Rate for BPE tokens (WER-BPE) between
