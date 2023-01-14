@@ -22,6 +22,7 @@ from torchmetrics import Metric
 from nemo.collections.asr.metrics.wer import AbstractCTCDecoding, CTCDecodingConfig
 from nemo.collections.asr.parts.submodules import ctc_beam_decoding
 from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis
+from nemo.collections.asr.metrics.seq2seq import Seq2SeqDecoder
 from nemo.collections.common.tokenizers.tokenizer_spec import TokenizerSpec
 from nemo.utils import logging
 
@@ -203,7 +204,8 @@ class WERS2S(Metric):
 
     def __init__(
         self,
-        decoding: CTCBPEDecoding,
+        decoding: Seq2SeqDecoder,
+        blank_id: int = 0,
         use_cer=False,
         log_prediction=True,
         fold_consecutive=True,
@@ -212,7 +214,7 @@ class WERS2S(Metric):
         super().__init__(dist_sync_on_step=dist_sync_on_step, compute_on_step=False)
         self.decoding = decoding
         self.tokenizer = self.decoding.tokenizer
-        self.blank_id = self.decoding.tokenizer.tokenizer.vocab_size
+        self.blank_id = blank_id
         self.use_cer = use_cer
         self.log_prediction = log_prediction
         self.fold_consecutive = fold_consecutive
@@ -240,20 +242,28 @@ class WERS2S(Metric):
         words = 0
         scores = 0
         references = []
+        hypotheses = []
         with torch.no_grad():
             targets_cpu_tensor = targets.long().cpu()
-            tgt_lenths_cpu_tensor = target_lengths.long().cpu()
+            tgt_lengths_cpu_tensor = target_lengths.long().cpu()
+            prediction_cpu_tensor = predictions.argmax(dim=-1).long().cpu()
+            prd_lengths_cpu_tensor = predictions_lengths.long().cpu()
+
+            batch_size = targets_cpu_tensor.size(0)
 
             # iterate over batch
-            for ind in range(targets_cpu_tensor.shape[0]):
-                tgt_len = tgt_lenths_cpu_tensor[ind].item()
+            for ind in range(batch_size):
+                #decode targets
+                tgt_len = tgt_lengths_cpu_tensor[ind].item()
                 target = targets_cpu_tensor[ind][:tgt_len].numpy().tolist()
                 reference = self.decoding.decode_tokens_to_str(target)
                 references.append(reference)
 
-            hypotheses, _ = self.decoding.ctc_decoder_predictions_tensor(
-                predictions, predictions_lengths, fold_consecutive=self.fold_consecutive
-            )
+                #decoder predictions
+                prd_len = prd_lengths_cpu_tensor[ind].item()
+                predicted = prediction_cpu_tensor[ind][:prd_len].numpy().tolist()
+                hypothesis = self.decoding.decode_tokens_to_str(predicted)
+                hypotheses.append(hypothesis)
 
         if self.log_prediction:
             logging.info(f"\n")

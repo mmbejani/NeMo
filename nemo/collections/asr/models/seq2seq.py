@@ -10,7 +10,7 @@ from nemo.collections.asr.models import ASRModel
 from nemo.collections.asr.parts.mixins import ASRBPEMixin
 from nemo.collections.asr.losses.seq2seq import Seq2SeqLoss
 from nemo.collections.asr.metrics.seq2seq import Seq2SeqDecoder
-from nemo.collections.asr.metrics.wer_bpe import WERBPE
+from nemo.collections.asr.metrics.wer_bpe import WERS2S
 from nemo.collections.asr.parts.preprocessing.perturb import process_augmentations
 from nemo.core.classes import Exportable
 from nemo.core.classes.mixins import AccessMixin
@@ -29,7 +29,6 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
         if 'encoder_tokenizer' not in cfg and 'decoder_tokenizer' not in cfg:
             raise ValueError("`cfg` must have `tokenizer` config to create a tokenizer !")
         self._setup_dual_tokenizer(cfg.encoder_tokenizer, cfg.decoder_tokenizer)
-        encoder_vocabulary = self.encoder_tokenizer.tokenizer.get_vocab()
 
         self.world_size = 1
         self.max_seq_len = self.cfg.get('max_len_seq', 100)
@@ -52,7 +51,7 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
 
         self.decoding = Seq2SeqDecoder(tokenizer=self.decoder_tokenizer)
         
-        self._wer = WERBPE(
+        self._wer = WERS2S(
             decoding=self.decoding,
             use_cer=self._cfg.get('use_cer', False),
             dist_sync_on_step=True,

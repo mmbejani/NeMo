@@ -1,11 +1,6 @@
 from typing import List
 
-import torch
-
-import editdistance
-
 from nemo.collections.common.tokenizers.tokenizer_spec import TokenizerSpec
-from nemo.collections.asr.metrics.wer_bpe import WERBPE
 from nemo.utils import logging
 
 
