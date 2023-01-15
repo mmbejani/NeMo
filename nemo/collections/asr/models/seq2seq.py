@@ -1,10 +1,13 @@
 from typing import List, Tuple
 
 import torch
-from torch.nn.functional import log_softmax
+from torch.nn.utils.rnn import pad_sequence
+
+import soundfile as sf
 from typing import Dict, List, Optional, Union
-from omegaconf import DictConfig, ListConfig, open_dict
+from omegaconf import DictConfig, open_dict
 from random import random
+import numpy as np
 
 from nemo.collections.asr.data import audio_to_text_dataset
 from nemo.collections.asr.models import ASRModel
@@ -174,7 +177,24 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
 
     @torch.no_grad()
     def transcribe(self, audio_bytes: List[bytes]) -> List[str]:
-        pass
+        audios = [torch.tensor(sf.read(audio_byte)[0]) for audio_byte in audio_bytes]
+        audios_length = [audio.size(0) for audio in audios]
+        
+        max_len = np.max(audios_length)
+        audios_length = [audio_len / max_len for audio_len in audios_length]
+        
+        input_length = torch.tensor(audios_length).long()
+        input_tensor = pad_sequence(audios, batch_first=True)
+        
+        logits, _, _ = self.forward(input_tensor, input_length)
+        tokens = torch.argmax(logits, dim=-1)
+        
+        transcrptions = [self.decoder_tokenizer.decode(token.detach().cpu().numpy().aslist())
+                            for token in tokens]
+        
+        return transcrptions
+        
+        
 
     def _setup_dataloader_from_config(self, config: Optional[Dict]):
         if 'augmentor' in config:
