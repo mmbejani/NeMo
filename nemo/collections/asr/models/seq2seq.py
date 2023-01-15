@@ -4,6 +4,7 @@ import torch
 from torch.nn.functional import log_softmax
 from typing import Dict, List, Optional, Union
 from omegaconf import DictConfig, ListConfig, open_dict
+from random import random
 
 from nemo.collections.asr.data import audio_to_text_dataset
 from nemo.collections.asr.models import ASRModel
@@ -32,6 +33,7 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
 
         self.world_size = 1
         self.max_seq_len = self.cfg.get('max_len_seq', 100)
+        self.teacher_forcing_ratio = self.cfg.get('teacher_forcing_ratio', 0.)
         if trainer is not None:
             self.world_size = trainer.world_size
 
@@ -67,6 +69,7 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
         signal, signal_len, encoder_transcript, encoder_transcript_len, decoder_transcript, decoder_transcript_len = batch
         seq_output, ctc_output, encoded_len = self.forward(input_signal=signal, 
                                                            input_signal_length=signal_len, 
+                                                           target=decoder_transcript,
                                                            target_length=decoder_transcript_len)
         loss_value, seq_loss, ctc_loss = self.loss.forward(log_probs=ctc_output, logits=seq_output, 
                                                    encoder_targets=encoder_transcript, 
@@ -106,7 +109,7 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
         
 
     @typecheck()
-    def forward(self, input_signal, input_signal_length=None, target_length=None) -> Tuple[torch.Tensor]:
+    def forward(self, input_signal, input_signal_length=None, target=None, target_length=None) -> Tuple[torch.Tensor]:
         """Forwad through seq2seq model
 
         Args:
@@ -132,30 +135,40 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
         encoded = encoded.transpose(1,2)
         ctc_prediction = self.ctc_linear(encoded)
         ctc_prediction = self.log_softmax(ctc_prediction)
-        logits_list = []
-        
-        batch_size = encoded.size(0)
-        bos_tokens = torch.ones(size=[batch_size, 1], dtype=torch.long).to(self.device) \
-                    * self.decoder_tokenizer.bos_id
-        step_length = torch.ones(batch_size, dtype=torch.long)
-        output_tensor = self.decoder_embedding(bos_tokens)
 
         encoder_mask = self._mask_generator(encoded_len)
-        for i in range(self.max_seq_len if target_length is None else torch.max(target_length).item()):
-            decoder_mask = self._mask_generator(step_length)
-            decoder_output = self.decoder(output_tensor, decoder_mask, encoded, encoder_mask)
-            logits = self.sequence_linear(decoder_output)[:, -1].detach()
-            logits_list.append(logits.unsqueeze(1))
-            next_tokens = torch.argmax(logits, dim=-1)
-            output_tensor = torch.cat([output_tensor, self.decoder_embedding(next_tokens).unsqueeze(1)], dim=1)
-            if i == self.max_seq_len - 1:
-                logging.warning(f'The length of generated sequences exceeds the maximum length of {self.max_seq_len}')
-            for i in range(batch_size):
-                if step_length[i] < target_length[i]:
-                    step_length[i] += 1
-        
-        logits = torch.cat(logits_list, dim=1)
 
+        batch_size = encoded.size(0)
+        bos_tokens = torch.ones(size=[batch_size, 1], dtype=torch.long).to(self.device) \
+                * self.decoder_tokenizer.bos_id
+
+        if target is not None and random() < self.teacher_forcing_ratio:
+            decoder_mask = self._mask_generator(target_length)
+            bos_target_removed_eos = torch.cat([bos_tokens, target[:, :-1]], dim=1)
+            embedding = self.decoder_embedding(bos_target_removed_eos)
+            decoder_output = self.decoder(embedding, decoder_mask, encoded, encoder_mask)
+            logits = self.sequence_linear(decoder_output)
+            logging.warning('Teacher forcing return value')
+                    
+        else:
+            logits_list = []
+
+            step_length = torch.ones(batch_size, dtype=torch.long)
+            output_tensor = self.decoder_embedding(bos_tokens)
+            for i in range(self.max_seq_len if target_length is None else torch.max(target_length).item()):
+                decoder_mask = self._mask_generator(step_length)
+                decoder_output = self.decoder(output_tensor, decoder_mask, encoded, encoder_mask)
+                logits = self.sequence_linear(decoder_output)[:, -1]
+                logits_list.append(logits.unsqueeze(1))
+                next_tokens = torch.argmax(logits.detach(), dim=-1)
+                output_tensor = torch.cat([output_tensor, self.decoder_embedding(next_tokens).unsqueeze(1)], dim=1)
+                if i == self.max_seq_len - 1:
+                    logging.warning(f'The length of generated sequences exceeds the maximum length of {self.max_seq_len}')
+                for i in range(batch_size):
+                    if step_length[i] < target_length[i]:
+                        step_length[i] += 1
+            logits = torch.cat(logits_list, dim=1)
+            logging.warning('Not Teacher forcing return value')
         return logits, ctc_prediction, encoded_len
 
 

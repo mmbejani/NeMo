@@ -27,6 +27,7 @@ model:
   log_prediction: true # enables logging sample predictions in the output during training
   ctc_reduction: 'mean_batch'
   skip_nan_grad: false
+  teacher_forcing_ratio: 0.5
 
   train_ds:
     manifest_filepath: ./ #???

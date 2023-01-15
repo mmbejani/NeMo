@@ -1,8 +1,6 @@
 from torch import nn
 
 from nemo.core.classes import Serialization, Typing, typecheck
-from nemo.collections.common.losses import CrossEntropyLoss
-
 
 class Seq2SeqLoss(Serialization, Typing):
 
@@ -20,7 +18,7 @@ class Seq2SeqLoss(Serialization, Typing):
             self._apply_reduction = False
         
         self.ctc_loss = nn.CTCLoss(blank=blank_index, reduction=ctc_reduction, zero_infinity=zero_infinity)
-        self.seq_loss = CrossEntropyLoss(logits_ndim=3)
+        self.seq_loss = nn.CrossEntropyLoss()
         self.ctc_weight = ctc_weight
 
 
@@ -66,7 +64,7 @@ class Seq2SeqLoss(Serialization, Typing):
         # here we transpose because we expect [B, T, D] while PyTorch assumes [T, B, D]
         # Pytroch assumption is better :)
         log_probs = log_probs.transpose(1, 0)
-        seq_loss = self.seq_loss(logits=logits, labels=decoder_targets)
+        seq_loss = self.seq_loss(input=logits.transpose(1,2), target=decoder_targets)
         ctc_loss = self.ctc_loss(log_probs=log_probs, 
                              targets=encoder_targets,
                              input_lengths=input_lengths, 
