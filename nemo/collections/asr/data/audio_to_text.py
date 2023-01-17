@@ -207,7 +207,7 @@ class ASRDualTokenizerManifestProcessor:
 
     def process_text_by_sample(self, sample: collections.ASRAudioDualText.OUTPUT_TYPE) -> Tuple[Tuple[List[int], int]]:
         et, etl = sample.encoder_text_tokens, len(sample.encoder_text_tokens)
-        dt, dtl = sample.encoder_text_tokens, len(sample.encoder_text_tokens)
+        dt, dtl = sample.decoder_text_tokens, len(sample.decoder_text_tokens)
 
         dt = dt + [self.eos_id]
         dtl += 1
