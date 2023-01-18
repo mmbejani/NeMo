@@ -110,6 +110,35 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
 
         return {'loss': loss_value, 'log': tensorboard_logs}
         
+    def validation_step(self, batch, batch_idx):
+        signal, signal_len, encoder_transcript, encoder_transcript_len, decoder_transcript, decoder_transcript_len = batch
+        seq_output, ctc_output, encoded_len = self.forward(input_signal=signal, 
+                                                           input_signal_length=signal_len, 
+                                                           target=decoder_transcript,
+                                                           target_length=decoder_transcript_len)
+        loss_value, _, _ = self.loss.forward(log_probs=ctc_output, logits=seq_output, 
+                                                   encoder_targets=encoder_transcript, 
+                                                   decoder_targets=decoder_transcript, 
+                                                   input_lengths=encoded_len,
+                                                   encoder_target_lengths=encoder_transcript_len,
+                                                   decoder_target_lengths=decoder_transcript_len)
+
+
+        self._wer.update(
+            predictions=torch.nn.functional.softmax(seq_output, dim=-1),
+            targets=decoder_transcript,
+            target_lengths=decoder_transcript_len,
+            predictions_lengths=encoded_len,
+        )
+        wer, wer_num, wer_denom = self._wer.compute()
+        self._wer.reset()
+        tensorboard_logs ={'val_loss': loss_value,
+            'val_wer_num': wer_num,
+            'val_wer_denom': wer_denom,
+            'val_wer': wer
+        }
+
+        return tensorboard_logs
 
     @typecheck()
     def forward(self, input_signal, input_signal_length=None, target=None, target_length=None) -> Tuple[torch.Tensor]:
@@ -151,7 +180,6 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
             embedding = self.decoder_embedding(bos_target_removed_eos)
             decoder_output = self.decoder(embedding, decoder_mask, encoded, encoder_mask)
             logits = self.sequence_linear(decoder_output)
-            logging.warning('Teacher forcing return value')
                     
         else:
             logits_list = []
@@ -171,7 +199,6 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
                     if step_length[i] < target_length[i]:
                         step_length[i] += 1
             logits = torch.cat(logits_list, dim=1)
-            logging.warning('Not Teacher forcing return value')
         return logits, ctc_prediction, encoded_len
 
 
@@ -191,7 +218,6 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
         
         transcrptions = [self.decoder_tokenizer.decode(token.detach().cpu().numpy().aslist())
                             for token in tokens]
-        
         return transcrptions
         
         
@@ -278,3 +304,4 @@ class Seq2SeqModelWithLM(Seq2SeqModel):
 
     def transcribe(self, paths2audio_files: List[str], batch_size: int = 4) -> List[str]:
         return super().transcribe(paths2audio_files, batch_size)
+        
