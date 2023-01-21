@@ -159,7 +159,7 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
             input_signal=input_signal, length=input_signal_length,
         )
 
-        if self.spec_augmentation is not None and self.training:
+        if hasattr(self, "spec_augmentation") and self.spec_augmentation is not None and self.training:
             processed_signal = self.spec_augmentation(input_spec=processed_signal, length=processed_signal_length)
          
         encoder_output = self.encoder(audio_signal=processed_signal, length=processed_signal_length)
@@ -183,7 +183,8 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
                     
         else:
             logits_list = []
-
+            if not self.training:
+                eos_tokens = [False] * batch_size
             step_length = torch.ones(batch_size, dtype=torch.long)
             output_tensor = self.decoder_embedding(bos_tokens)
             for i in range(self.max_seq_len if target_length is None else torch.max(target_length).item()):
@@ -193,30 +194,34 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
                 logits_list.append(logits.unsqueeze(1))
                 next_tokens = torch.argmax(logits.detach(), dim=-1)
                 output_tensor = torch.cat([output_tensor, self.decoder_embedding(next_tokens).unsqueeze(1)], dim=1)
+                if not self.training:
+                    for i in range(batch_size):
+                        if next_tokens[i].item() in {self.decoder_tokenizer.eos_id, self.decoder_tokenizer.pad_id}:
+                            eos_tokens[i] = True
+                    if all(eos_tokens):
+                        break
                 if i == self.max_seq_len - 1:
                     logging.warning(f'The length of generated sequences exceeds the maximum length of {self.max_seq_len}')
-                for i in range(batch_size):
-                    if step_length[i] < target_length[i]:
-                        step_length[i] += 1
+                elif self.training:
+                    for i in range(batch_size):
+                        if step_length[i] < target_length[i]:
+                            step_length[i] += 1
             logits = torch.cat(logits_list, dim=1)
         return logits, ctc_prediction, encoded_len
 
 
     @torch.no_grad()
     def transcribe(self, audio_bytes: List[bytes]) -> List[str]:
-        audios = [torch.tensor(sf.read(audio_byte)[0]) for audio_byte in audio_bytes]
+        audios = [torch.tensor(sf.read(audio_byte)[0], dtype=torch.float32) for audio_byte in audio_bytes]
         audios_length = [audio.size(0) for audio in audios]
-        
-        max_len = np.max(audios_length)
-        audios_length = [audio_len / max_len for audio_len in audios_length]
         
         input_length = torch.tensor(audios_length).long()
         input_tensor = pad_sequence(audios, batch_first=True)
         
         logits, _, _ = self.forward(input_tensor, input_length)
         tokens = torch.argmax(logits, dim=-1)
-        
-        transcrptions = [self.decoder_tokenizer.decode(token.detach().cpu().numpy().aslist())
+    
+        transcrptions = [self.decoding.decode_tokens_to_str(token.detach().cpu().numpy().tolist())
                             for token in tokens]
         return transcrptions
         
