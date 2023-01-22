@@ -16,6 +16,9 @@ from nemo.collections.asr.losses.seq2seq import Seq2SeqLoss
 from nemo.collections.asr.metrics.seq2seq import Seq2SeqDecoder
 from nemo.collections.asr.metrics.wer_bpe import WERS2S
 from nemo.collections.asr.parts.preprocessing.perturb import process_augmentations
+from nemo.collections.nlp.models.language_modeling.transformer_lm_model import \
+        (get_transformer,
+        get_tokenizer)
 from nemo.core.classes import Exportable
 from nemo.core.classes.mixins import AccessMixin
 from nemo.core.classes.common import typecheck
@@ -272,9 +275,27 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
 
 class Seq2SeqModelWithLM(Seq2SeqModel):
 
-    def __init__(self, cfg: DictConfig, trainer: Trainer = None):
-        super().__init__(cfg, trainer)
+    def __init__(self, cfg: DictConfig):
+        """This class is a Module which is not trainable. Therefore, it should be loaded from 
+        checkpoint and can not be trained.
+
+        Args:
+            cfg (DictConfig): a yaml based configuration which has keys named 
+                                - acoustic_model_path
+                                - lm_model_path
+                              If this value is None then, an exception is raised.
+        """
+        super().__init__(cfg, None)
+
+        self.beam_size = cfg.get('beam_size',1)
+
+        state_dict = torch.load(cfg.model_path)
+        self.load_state_dict(state_dict)
+
+        self.lm = get_transformer(library='huggingface', model_name=cfg.lm_model_name, pretrained=True)
+        self.lm.eval()
+        self.eval()
         
 
-    def transcribe(self, paths2audio_files: List[str], batch_size: int = 4) -> List[str]:
+    def transcribe(self, paths2audio_files: List[str]) -> List[str]:
         return super().transcribe(paths2audio_files, batch_size)
