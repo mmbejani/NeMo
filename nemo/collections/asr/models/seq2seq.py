@@ -2,12 +2,12 @@ from typing import List, Tuple
 
 import torch
 from torch.nn.utils.rnn import pad_sequence
+import torchaudio
 
 import soundfile as sf
 from typing import Dict, List, Optional, Union
 from omegaconf import DictConfig, open_dict
 from random import random
-import numpy as np
 
 from nemo.collections.asr.data import audio_to_text_dataset
 from nemo.collections.asr.models import ASRModel
@@ -317,7 +317,7 @@ class Seq2SeqModelWithLM(Seq2SeqModel):
                               If this value is None then, an exception is raised.
         """
         super().__init__(cfg, None)
-
+        self.cfg = model_utils.convert_model_config_to_dict_config(cfg)
         self.beam_size = cfg.get('beam_size',1)
 
         state_dict = torch.load(cfg.model_path)
@@ -326,8 +326,56 @@ class Seq2SeqModelWithLM(Seq2SeqModel):
         self.lm = get_transformer(library='huggingface', model_name=cfg.lm_model_name, pretrained=True)
         self.lm.eval()
         self.eval()
+
+        
+
+        if 'encoder_tokenizer' not in cfg and 'decoder_tokenizer' not in cfg:
+            raise ValueError("`cfg` must have `tokenizer` config to create a tokenizer !")
+        self._setup_dual_tokenizer(cfg.encoder_tokenizer, cfg.decoder_tokenizer)
+
+        self.world_size = 1
+        self.max_seq_len = self.cfg.get('max_len_seq', 100)
+
+        self.preprocessor = Seq2SeqModel.from_config_dict(self.cfg.preprocessor)
+        self.encoder = Seq2SeqModel.from_config_dict(self.cfg.encoder)
+        self.decoder = Seq2SeqModel.from_config_dict(self.cfg.decoder)
+        self.ctc_linear = Seq2SeqModel.from_config_dict(self.cfg.ctc_linear)
+        self.decoder_embedding = Seq2SeqModel.from_config_dict(self.cfg.decoder_embedding)
+        self.decoder_embedding.to(self.device)
+        self.sequence_linear = Seq2SeqModel.from_config_dict(self.cfg.sequence_linear)
+        self.log_softmax = torch.nn.LogSoftmax(dim=-1)
+
+    def _encoder_transcription(self, input_signal: torch.Tensor,
+                               input_signal_length: torch.Tensor) -> Tuple[
+                                                                        List[str], 
+                                                                        torch.Tensor,
+                                                                        torch.Tensor]:
+        processed_signal, processed_signal_length = self.preprocessor(
+            input_signal=input_signal, length=input_signal_length,
+        )
+        encoder_output = self.encoder(audio_signal=processed_signal, length=processed_signal_length)
+        encoded, encoded_len = encoder_output[0], encoder_output[1]
+        encoded = encoded.transpose(1,2)
+        ctc_prediction = self.ctc_linear(encoded)
+        ctc_prediction = self.log_softmax(ctc_prediction)
+        tokens = torch.argmax(ctc_prediction, dim=-1).detach().cpu().numpy().tolist()
+
+        transcrptions = [self.decoding.decode_tokens_to_str(token)
+                            for token in tokens]
+        
+        return  [], encoded, encoded_len
+
+
         
 
     def transcribe(self, paths2audio_files: List[str]) -> List[str]:
-        return super().transcribe(paths2audio_files, batch_size)
-        
+        """This method transcribes a batch of utterances rely on acoustic model and language model.
+
+        Args:
+            paths2audio_files (List[str]): List of path to utterance (sample rate must be 16kHz)
+        """
+        audio_tensors = [torchaudio.load(path2audio)[0] for path2audio in paths2audio_files]
+        pass
+
+    def transcribe_single_file(self, path2audio_file: str) -> str:
+        audio_tensosr = torchaudio.load(path2audio_file)[0]
