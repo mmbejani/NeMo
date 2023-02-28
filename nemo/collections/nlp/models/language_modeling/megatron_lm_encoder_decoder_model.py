@@ -42,16 +42,15 @@ from nemo.utils import AppState, logging
 try:
     from apex.transformer import parallel_state, tensor_parallel
     from apex.transformer.enums import ModelType
-    from apex.transformer import parallel_state, tensor_parallel
     from apex.transformer.pipeline_parallel.schedules.common import build_model
     from apex.transformer.pipeline_parallel.schedules.fwd_bwd_no_pipelining import forward_backward_no_pipelining
     from apex.transformer.pipeline_parallel.schedules.fwd_bwd_pipelining_without_interleaving import (
         forward_backward_pipelining_without_interleaving,
     )
     from apex.transformer.pipeline_parallel.utils import (
-        get_num_microbatches,
         _reconfigure_microbatch_calculator,
         get_micro_batch_size,
+        get_num_microbatches,
     )
 
     HAVE_APEX = True
@@ -108,12 +107,12 @@ class MegatronLMEncoderDecoderModel(MegatronBaseModel):
             # Model wrapper to convert both model and inputs to half precision
             self.enc_dec_model = Float16Module(module=self.enc_dec_model, precision=cfg.precision)
 
-        if self.cfg.precision == 32:
-            self.autocast_dtype = torch.float
-        elif self.cfg.precision == 16:
-            self.autocast_dtype = torch.half
-        elif self.cfg.precision == 'bf16':
+        if self.cfg.precision == 'bf16':
             self.autocast_dtype = torch.bfloat16
+        elif int(self.cfg.precision) == 32:
+            self.autocast_dtype = torch.float
+        elif int(self.cfg.precision) == 16:
+            self.autocast_dtype = torch.half
         else:
             raise ValueError('precision must be in [32, 16, "bf16"]')
 
@@ -369,8 +368,10 @@ class MegatronLMEncoderDecoderModel(MegatronBaseModel):
             loss_mean = torch.tensor(0.0).cuda()
 
         if self.with_distributed_adam:
-            # gradients are reduced internally in distributed optimizer
-            pass
+            # synchronize asynchronous grad reductions
+            # note: not necessary, but reduces performance degradation
+            # from multiple simultaneous NCCL calls
+            self._optimizer._finish_bucket_grad_sync()
         elif self.megatron_amp_o2:
             # when using pipeline parallelism grads must be reduced after the pipeline (not asynchronously)
             if self.cfg.get('pipeline_model_parallel_size', 1) > 1:
@@ -686,7 +687,7 @@ class MegatronLMEncoderDecoderModel(MegatronBaseModel):
 
         return logits_tensor
 
-    def validation_step(self, batch, batch_idx):
+    def validation_step(self, batch, batch_idx, dataloader_idx=0):
         """
         return_values - if given, returns a dictionary with given keys and corresponding values
         """
@@ -953,8 +954,8 @@ class MegatronLMEncoderDecoderModel(MegatronBaseModel):
             ), "share_decoder_tokens_head_embeddings must be True when using pipeline model parallel > 1"
             self.enc_dec_model.sync_initial_word_embeddings()
             if (
-                self.cfg.encoder.get('position_embedding_type') != 'relative'
-                and self.cfg.decoder.get('position_embedding_type') != 'relative'
+                self.cfg.encoder.get('position_embedding_type') == 'learned_absolute'
+                and self.cfg.decoder.get('position_embedding_type') == 'learned_absolute'
             ):
                 self.enc_dec_model.sync_initial_position_embeddings()
             # Synchronize RPE embeddings across pipeline parallel ranks.
