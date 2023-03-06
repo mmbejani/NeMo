@@ -14,7 +14,7 @@ from nemo.collections.asr.models import ASRModel
 from nemo.collections.asr.parts.mixins import ASRBPEMixin
 from nemo.collections.asr.losses.seq2seq import Seq2SeqLoss
 from nemo.collections.asr.metrics.seq2seq import Seq2SeqDecoder
-from nemo.collections.asr.metrics.wer_bpe import WERS2S
+from nemo.collections.asr.metrics.wer_bpe import WERS2S, CTCBPEDecoding
 from nemo.collections.asr.parts.preprocessing.perturb import process_augmentations
 from nemo.collections.nlp.models.language_modeling.transformer_lm_model import \
         (get_transformer,
@@ -22,6 +22,7 @@ from nemo.collections.nlp.models.language_modeling.transformer_lm_model import \
 from nemo.core.classes import Exportable
 from nemo.core.classes.mixins import AccessMixin
 from nemo.core.classes.common import typecheck
+from torch.nn import Conv1d
 from nemo.utils import logging, model_utils
 
 from pytorch_lightning import Trainer
@@ -51,6 +52,7 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
         self.encoder = Seq2SeqModel.from_config_dict(self.cfg.encoder)
         self.decoder = Seq2SeqModel.from_config_dict(self.cfg.decoder)
         self.ctc_linear = Seq2SeqModel.from_config_dict(self.cfg.ctc_linear)
+        self.connector_conv = Seq2SeqModel.from_config_dict(self.cfg.connector_conv)
         self.decoder_embedding = Seq2SeqModel.from_config_dict(self.cfg.decoder_embedding)
         self.decoder_embedding.to(self.device)
         self.sequence_linear = Seq2SeqModel.from_config_dict(self.cfg.sequence_linear)
@@ -167,6 +169,7 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
          
         encoder_output = self.encoder(audio_signal=processed_signal, length=processed_signal_length)
         encoded, encoded_len = encoder_output[0], encoder_output[1]
+        conv_encoded = self.connector_conv(encoded)
         encoded = encoded.transpose(1,2)
         ctc_prediction = self.ctc_linear(encoded)
         ctc_prediction = self.log_softmax(ctc_prediction)
@@ -181,7 +184,7 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
             decoder_mask = self._mask_generator(target_length)
             bos_target_removed_eos = torch.cat([bos_tokens, target[:, :-1]], dim=1)
             embedding = self.decoder_embedding(bos_target_removed_eos)
-            decoder_output = self.decoder(embedding, decoder_mask, encoded, encoder_mask)
+            decoder_output = self.decoder(embedding, decoder_mask, conv_encoded, encoder_mask)
             logits = self.sequence_linear(decoder_output)
                     
         else:
@@ -318,6 +321,7 @@ class Seq2SeqModelWithLM(Seq2SeqModel):
         """
         super().__init__(cfg, None)
         self.cfg = model_utils.convert_model_config_to_dict_config(cfg)
+        self._setup_dual_tokenizer(cfg.encoder_tokenizer, cfg.decoder_tokenizer)
         self.beam_size = cfg.get('beam_size',1)
 
         state_dict = torch.load(cfg.model_path)
@@ -327,14 +331,13 @@ class Seq2SeqModelWithLM(Seq2SeqModel):
         self.lm.eval()
         self.eval()
 
-        
-
         if 'encoder_tokenizer' not in cfg and 'decoder_tokenizer' not in cfg:
             raise ValueError("`cfg` must have `tokenizer` config to create a tokenizer !")
         self._setup_dual_tokenizer(cfg.encoder_tokenizer, cfg.decoder_tokenizer)
 
         self.world_size = 1
         self.max_seq_len = self.cfg.get('max_len_seq', 100)
+        self.greedy_decoder = CTCBPEDecoding()
 
         self.preprocessor = Seq2SeqModel.from_config_dict(self.cfg.preprocessor)
         self.encoder = Seq2SeqModel.from_config_dict(self.cfg.encoder)
@@ -344,6 +347,7 @@ class Seq2SeqModelWithLM(Seq2SeqModel):
         self.decoder_embedding.to(self.device)
         self.sequence_linear = Seq2SeqModel.from_config_dict(self.cfg.sequence_linear)
         self.log_softmax = torch.nn.LogSoftmax(dim=-1)
+        
 
     def _encoder_transcription(self, input_signal: torch.Tensor,
                                input_signal_length: torch.Tensor) -> Tuple[
@@ -363,7 +367,7 @@ class Seq2SeqModelWithLM(Seq2SeqModel):
         transcrptions = [self.decoding.decode_tokens_to_str(token)
                             for token in tokens]
         
-        return  [], encoded, encoded_len
+        return  transcrptions, encoded, encoded_len
 
 
         

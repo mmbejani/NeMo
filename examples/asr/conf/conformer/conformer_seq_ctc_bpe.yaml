@@ -27,16 +27,16 @@ model:
   log_prediction: true # enables logging sample predictions in the output during training
   ctc_reduction: 'mean_batch'
   skip_nan_grad: false
-  teacher_forcing_ratio: 0.5
+  d_model: 176
+  teacher_forcing_ratio: 0.8
 
   train_ds:
-    manifest_filepath: ./ #???
+    manifest_filepath: ??? #manifest.json
     sample_rate: ${model.sample_rate}
-    batch_size: 16 # you may increase batch_size if your memory allows
+    batch_size: 28 # you may increase batch_size if your memory allows
     shuffle: true
-    num_workers: 8
-    pin_memory: true
-    use_start_end_token: false
+    num_workers: 16
+    pin_memory: false
     trim_silence: false
     max_duration: 16.7 # it is set for LibriSpeech, you may need to update it for your dataset
     min_duration: 0.1
@@ -49,9 +49,9 @@ model:
     bucketing_batch_size: null
 
   validation_ds:
-    manifest_filepath: null
+    manifest_filepath: ??? #val_manifest.json
     sample_rate: ${model.sample_rate}
-    batch_size: 16 # you may increase batch_size if your memory allows
+    batch_size: 32 # you may increase batch_size if your memory allows
     shuffle: false
     num_workers: 8
     pin_memory: true
@@ -69,15 +69,11 @@ model:
   # recommend small vocab size of 128 or 256 when using 4x sub-sampling
   # you may find more detail on how to train a tokenizer at: /scripts/tokenizers/process_asr_text_tokenizer.py
   encoder_tokenizer:
-    dir: /home/mahdi/Projects/NeMo/examples/asr/asr_seq2seq/tokenizer.ckpt #???  # path to directory which contains either tokenizer.model (bpe) or vocab.txt (wpe)
+    dir: encoder_tokenizer.model #???  # path to directory which contains either tokenizer.model (bpe) or vocab.txt (wpe)
     type: bpe  # Can be either bpe (SentencePiece tokenizer) or wpe (WordPiece tokenizer)
 
   decoder_tokenizer:
-    dir: /home/mahdi/Projects/NeMo/examples/asr/asr_seq2seq/tokenizer.ckpt #???  # path to directory which contains either tokenizer.model (bpe) or vocab.txt (wpe)
-    type: bpe  # Can be either bpe (SentencePiece tokenizer) or wpe (WordPiece tokenizer)
-
-  tokenizer:
-    dir: ./tokenizer.ckpt #???  # path to directory which contains either tokenizer.model (bpe) or vocab.txt (wpe)
+    dir: tokenizer.ckpt #???  # path to directory which contains either tokenizer.model (bpe) or vocab.txt (wpe)
     type: bpe  # Can be either bpe (SentencePiece tokenizer) or wpe (WordPiece tokenizer)
 
   preprocessor:
@@ -88,19 +84,19 @@ model:
     window_stride: 0.01
     window: "hann"
     features: 80
-    n_fft: 176
+    n_fft: 2048
     log: true
     frame_splicing: 1
     dither: 0.00001
     pad_to: 0
     pad_value: 0.0
 
-  spec_augment:
+  spec_augmentation:
     _target_: nemo.collections.asr.modules.SpectrogramAugmentation
-    freq_masks: 2 # set to zero to disable it
+    freq_masks: 4 # set to zero to disable it
     # you may use lower time_masks for smaller models to have a faster convergence
-    time_masks: 10 # set to zero to disable it
-    freq_width: 27
+    time_masks: 15 # set to zero to disable it
+    freq_width: 32
     time_width: 0.05
 
   encoder:
@@ -108,7 +104,7 @@ model:
     feat_in: ${model.preprocessor.features}
     feat_out: -1 # you may set it if you need different output size other than the default d_model
     n_layers: 5
-    d_model: 176
+    d_model: ${model.d_model}
 
     # Sub-sampling params
     subsampling: striding # vggnet, striding, stacking or stacking_norm, dw_striding
@@ -144,22 +140,35 @@ model:
 
   decoder:
     _target_: nemo.collections.asr.modules.transformer.TransformerDecoder
-    num_layers: 4,
-    hidden_size: 176,
-    inner_size: 256,
-    num_attention_heads: int = 12,
-    attn_score_dropout: 0.1,
-    attn_layer_dropout: 0.1,
+    num_layers: 4
+    hidden_size: ${model.d_model}
+    inner_size: 256
+    num_attention_heads: 8
+    attn_score_dropout: 0.1
+    attn_layer_dropout: 0.1
     ffn_dropout: 0.1
 
   ctc_linear:
     _target_: torch.nn.Linear
-    in_features: 256
-    out_features: 35
+    in_features: ${model.d_model}
+    out_features: 80
+
+  connector_conv:
+    _target_: torch.nnConv1d
+    in_channels: 176
+    out_channels: 176
+    kernel_size: 16
+    stride: 4
+
+  decoder_embedding:
+    _target_: torch.nn.Embedding
+    num_embeddings: 5000
+    embedding_dim: ${model.d_model}
+
 
   sequence_linear:
     _target_: torch.nn.Linear
-    in_features: 256
+    in_features: ${model.d_model}
     out_features: 5000
 
   optim:
@@ -170,7 +179,7 @@ model:
     # less necessity for weight_decay as we already have large augmentations with SpecAug
     # you may need weight_decay for large models, stable AMP training, small datasets, or when lower augmentations are used
     # weight decay of 0.0 with lr of 2.0 also works fine
-    weight_decay: 1e-3
+    weight_decay: 1e-5
 
     # scheduler setup
     sched:
@@ -187,18 +196,19 @@ trainer:
   max_epochs: 1000
   max_steps: -1 # computed at runtime if not set
   val_check_interval: 1.0 # Set to 0.25 to check 4 times per epoch, or an int for number of iterations
-  accelerator: auto
+  accelerator: gpu
   strategy: ddp
   accumulate_grad_batches: 4
-  gradient_clip_val: 0.0
-  precision: 32 # Should be set to 16 for O1 and O2 to enable the AMP.
-  log_every_n_steps: 10  # Interval of logging.
+  amp_backend: native
+  gradient_clip_val: 10.0
+  precision: 16 # Should be set to 16 for O1 and O2 to enable the AMP.
+  log_every_n_steps: 50  # Interval of logging.
   enable_progress_bar: True
   resume_from_checkpoint: null # The path to a checkpoint file to continue the training, restores the whole state including the epoch, step, LR schedulers, apex, etc.
   num_sanity_val_steps: 0 # number of steps to perform validation steps for sanity check the validation process before starting the training, setting to 0 disables it
   check_val_every_n_epoch: 1 # number of evaluations on validation every n epochs
   sync_batchnorm: true
-  enable_checkpointing: False  # Provided by exp_manager
+  enable_checkpointing: false  # Provided by exp_manager
   logger: false  # Provided by exp_manager
   benchmark: false # needs to be false for models with variable-length speech input as it slows down training
 
@@ -211,12 +221,12 @@ exp_manager:
     # in case of multiple validation sets, first one is used
     monitor: "val_wer"
     mode: "min"
-    save_top_k: 2
+    save_top_k: 1
     always_save_nemo: True # saves the checkpoints as nemo files instead of PTL checkpoints
 
   # you need to set these two to True to continue the training
-  resume_if_exists: false
-  resume_ignore_no_checkpoint: false
+  resume_if_exists: true
+  resume_ignore_no_checkpoint: true
 
   # You may use this section to create a W&B logger
   create_wandb_logger: false
