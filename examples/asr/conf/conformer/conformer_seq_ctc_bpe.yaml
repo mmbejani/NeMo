@@ -29,6 +29,11 @@ model:
   skip_nan_grad: false
   d_model: 176
   teacher_forcing_ratio: 0.8
+  joint_model: true
+
+  # Make some of modules freeze
+  encoder_trainable: false
+  decoder_trainable: false
 
   train_ds:
     manifest_filepath: ??? #manifest.json

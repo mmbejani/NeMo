@@ -59,6 +59,15 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
         self.log_softmax = torch.nn.LogSoftmax(dim=-1)
         self.loss = Seq2SeqLoss()
 
+        self.joint_model = Seq2SeqModel.from_config_dict(self.cfg.joint_model)
+
+        self.encoder_trainable = Seq2SeqModel.from_config_dict(self.cfg.encoder_trainable)
+        self.decoder_trainable = Seq2SeqModel.from_config_dict(self.cfg.decoder_trainable)
+        if not self.encoder_trainable:
+            self.encoder.eval()
+        if not self.decoder_trainable:
+            self.decoder.eval()
+
         self.decoding = Seq2SeqDecoder(tokenizer=self.decoder_tokenizer)
         
         self._wer = WERS2S(
@@ -144,6 +153,66 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
         }
 
         return tensorboard_logs
+    
+    def _encoder_forward(self, input_signal:torch.Tensor,
+                         input_signal_length:torch.Tensor=None) -> Tuple[torch.Tensor]:
+        processed_signal, processed_signal_length = self.preprocessor(
+            input_signal=input_signal, length=input_signal_length,
+        )
+
+        if hasattr(self, "spec_augmentation") and self.spec_augmentation is not None and self.training:
+            processed_signal = self.spec_augmentation(input_spec=processed_signal, length=processed_signal_length)
+         
+        encoder_output = self.encoder(audio_signal=processed_signal, length=processed_signal_length)
+        encoded, encoded_len = encoder_output[0], encoder_output[1]
+        encoded = encoded.transpose(1,2)
+        ctc_prediction = self.ctc_linear(encoded)
+        ctc_prediction = self.log_softmax(ctc_prediction)
+
+        return encoded, encoded_len, ctc_prediction
+        
+
+    def _decoder_forward(self, memory:torch.Tensor, 
+                         memory_mask: torch.Tensor,
+                         bos_tokens: torch.Tensor,
+                         target:torch.Tensor=None, target_length:torch.Tensor=None,
+                         teacher_forcing:bool=False) -> Tuple[torch.Tensor]:
+        if teacher_forcing:
+            decoder_mask = self._mask_generator(target_length)
+            bos_target_removed_eos = torch.cat([bos_tokens, target[:, :-1]], dim=1)
+            embedding = self.decoder_embedding(bos_target_removed_eos)
+            decoder_output = self.decoder(embedding, decoder_mask, memory, memory_mask)
+            logits = self.sequence_linear(decoder_output)
+            return logits
+
+        logits_list = []
+        batch_size = memory.size(0)
+        if not self.training:
+            eos_tokens = [False] * batch_size
+        step_length = torch.ones(batch_size, dtype=torch.long)
+        output_tensor = self.decoder_embedding(bos_tokens)
+        for i in range(self.max_seq_len if target_length is None else torch.max(target_length).item()):
+            decoder_mask = self._mask_generator(step_length)
+            decoder_output = self.decoder(output_tensor, decoder_mask, memory, memory_mask)
+            logits = self.sequence_linear(decoder_output)[:, -1]
+            logits_list.append(logits.unsqueeze(1))
+            next_tokens = torch.argmax(logits.detach(), dim=-1)
+            output_tensor = torch.cat([output_tensor, self.decoder_embedding(next_tokens).unsqueeze(1)], dim=1)
+            if not self.training:
+                for i in range(batch_size):
+                    if next_tokens[i].item() in {self.decoder_tokenizer.eos_id, self.decoder_tokenizer.pad_id}:
+                        eos_tokens[i] = True
+                if all(eos_tokens):
+                    break
+            if i == self.max_seq_len - 1:
+                logging.warning(f'The length of generated sequences exceeds the maximum length of {self.max_seq_len}')
+            elif self.training:
+                for i in range(batch_size):
+                    if step_length[i] < target_length[i]:
+                        step_length[i] += 1
+        logits = torch.cat(logits_list, dim=1)
+        return logits
+    
 
     @typecheck()
     def forward(self, input_signal, input_signal_length=None, target=None, target_length=None) -> Tuple[torch.Tensor]:
@@ -160,59 +229,24 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
                 2- The prediction of encoder based on CTC
                 3- The length of output that encoder is processed
         """
-        processed_signal, processed_signal_length = self.preprocessor(
-            input_signal=input_signal, length=input_signal_length,
-        )
-
-        if hasattr(self, "spec_augmentation") and self.spec_augmentation is not None and self.training:
-            processed_signal = self.spec_augmentation(input_spec=processed_signal, length=processed_signal_length)
-         
-        encoder_output = self.encoder(audio_signal=processed_signal, length=processed_signal_length)
-        encoded, encoded_len = encoder_output[0], encoder_output[1]
-        conv_encoded = self.connector_conv(encoded)
-        encoded = encoded.transpose(1,2)
-        ctc_prediction = self.ctc_linear(encoded)
-        ctc_prediction = self.log_softmax(ctc_prediction)
-
+        
+        encoded, encoded_len, ctc_prediction = self._encoder_forward(input_signal=input_signal,
+                                                                     input_signal_length=input_signal_length)
+        
         encoder_mask = self._mask_generator(encoded_len)
 
         batch_size = encoded.size(0)
         bos_tokens = torch.ones(size=[batch_size, 1], dtype=torch.long).to(self.device) \
                 * self.decoder_tokenizer.bos_id
+        
+        if not self.joint_model:
+            encoded = self.connector_conv(encoded)
 
         if target is not None and random() < self.teacher_forcing_ratio:
-            decoder_mask = self._mask_generator(target_length)
-            bos_target_removed_eos = torch.cat([bos_tokens, target[:, :-1]], dim=1)
-            embedding = self.decoder_embedding(bos_target_removed_eos)
-            decoder_output = self.decoder(embedding, decoder_mask, conv_encoded, encoder_mask)
-            logits = self.sequence_linear(decoder_output)
-                    
-        else:
-            logits_list = []
-            if not self.training:
-                eos_tokens = [False] * batch_size
-            step_length = torch.ones(batch_size, dtype=torch.long)
-            output_tensor = self.decoder_embedding(bos_tokens)
-            for i in range(self.max_seq_len if target_length is None else torch.max(target_length).item()):
-                decoder_mask = self._mask_generator(step_length)
-                decoder_output = self.decoder(output_tensor, decoder_mask, encoded, encoder_mask)
-                logits = self.sequence_linear(decoder_output)[:, -1]
-                logits_list.append(logits.unsqueeze(1))
-                next_tokens = torch.argmax(logits.detach(), dim=-1)
-                output_tensor = torch.cat([output_tensor, self.decoder_embedding(next_tokens).unsqueeze(1)], dim=1)
-                if not self.training:
-                    for i in range(batch_size):
-                        if next_tokens[i].item() in {self.decoder_tokenizer.eos_id, self.decoder_tokenizer.pad_id}:
-                            eos_tokens[i] = True
-                    if all(eos_tokens):
-                        break
-                if i == self.max_seq_len - 1:
-                    logging.warning(f'The length of generated sequences exceeds the maximum length of {self.max_seq_len}')
-                elif self.training:
-                    for i in range(batch_size):
-                        if step_length[i] < target_length[i]:
-                            step_length[i] += 1
-            logits = torch.cat(logits_list, dim=1)
+            logits = self._decoder_forward(encoded, encoder_mask,bos_tokens,
+                                           target, target_length, True)
+            return logits, ctc_prediction, encoded_len
+            
         return logits, ctc_prediction, encoded_len
 
 
@@ -302,84 +336,3 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
         for i in range(batch_lengths.size(0)):
             mask[i,:batch_lengths[i]] = torch.ones(batch_lengths[i]).long()
         return mask.to(self.device)
-
-
-
-
-
-class Seq2SeqModelWithLM(Seq2SeqModel):
-
-    def __init__(self, cfg: DictConfig):
-        """This class is a Module which is not trainable. Therefore, it should be loaded from 
-        checkpoint and can not be trained.
-
-        Args:
-            cfg (DictConfig): a yaml based configuration which has keys named 
-                                - acoustic_model_path
-                                - lm_model_path
-                              If this value is None then, an exception is raised.
-        """
-        super().__init__(cfg, None)
-        self.cfg = model_utils.convert_model_config_to_dict_config(cfg)
-        self._setup_dual_tokenizer(cfg.encoder_tokenizer, cfg.decoder_tokenizer)
-        self.beam_size = cfg.get('beam_size',1)
-
-        state_dict = torch.load(cfg.model_path)
-        self.load_state_dict(state_dict)
-
-        self.lm = get_transformer(library='huggingface', model_name=cfg.lm_model_name, pretrained=True)
-        self.lm.eval()
-        self.eval()
-
-        if 'encoder_tokenizer' not in cfg and 'decoder_tokenizer' not in cfg:
-            raise ValueError("`cfg` must have `tokenizer` config to create a tokenizer !")
-        self._setup_dual_tokenizer(cfg.encoder_tokenizer, cfg.decoder_tokenizer)
-
-        self.world_size = 1
-        self.max_seq_len = self.cfg.get('max_len_seq', 100)
-        self.greedy_decoder = CTCBPEDecoding()
-
-        self.preprocessor = Seq2SeqModel.from_config_dict(self.cfg.preprocessor)
-        self.encoder = Seq2SeqModel.from_config_dict(self.cfg.encoder)
-        self.decoder = Seq2SeqModel.from_config_dict(self.cfg.decoder)
-        self.ctc_linear = Seq2SeqModel.from_config_dict(self.cfg.ctc_linear)
-        self.decoder_embedding = Seq2SeqModel.from_config_dict(self.cfg.decoder_embedding)
-        self.decoder_embedding.to(self.device)
-        self.sequence_linear = Seq2SeqModel.from_config_dict(self.cfg.sequence_linear)
-        self.log_softmax = torch.nn.LogSoftmax(dim=-1)
-        
-
-    def _encoder_transcription(self, input_signal: torch.Tensor,
-                               input_signal_length: torch.Tensor) -> Tuple[
-                                                                        List[str], 
-                                                                        torch.Tensor,
-                                                                        torch.Tensor]:
-        processed_signal, processed_signal_length = self.preprocessor(
-            input_signal=input_signal, length=input_signal_length,
-        )
-        encoder_output = self.encoder(audio_signal=processed_signal, length=processed_signal_length)
-        encoded, encoded_len = encoder_output[0], encoder_output[1]
-        encoded = encoded.transpose(1,2)
-        ctc_prediction = self.ctc_linear(encoded)
-        ctc_prediction = self.log_softmax(ctc_prediction)
-        tokens = torch.argmax(ctc_prediction, dim=-1).detach().cpu().numpy().tolist()
-
-        transcrptions = [self.decoding.decode_tokens_to_str(token)
-                            for token in tokens]
-        
-        return  transcrptions, encoded, encoded_len
-
-
-        
-
-    def transcribe(self, paths2audio_files: List[str]) -> List[str]:
-        """This method transcribes a batch of utterances rely on acoustic model and language model.
-
-        Args:
-            paths2audio_files (List[str]): List of path to utterance (sample rate must be 16kHz)
-        """
-        audio_tensors = [torchaudio.load(path2audio)[0] for path2audio in paths2audio_files]
-        pass
-
-    def transcribe_single_file(self, path2audio_file: str) -> str:
-        audio_tensosr = torchaudio.load(path2audio_file)[0]
