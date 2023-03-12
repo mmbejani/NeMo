@@ -22,8 +22,10 @@ from nemo.collections.nlp.models.language_modeling.transformer_lm_model import \
 from nemo.core.classes import Exportable
 from nemo.core.classes.mixins import AccessMixin
 from nemo.core.classes.common import typecheck
-from torch.nn import Conv1d
 from nemo.utils import logging, model_utils
+
+from nemo.collections.asr.modules.transformer import TransformerDecoder
+
 
 from pytorch_lightning import Trainer
 
@@ -59,7 +61,7 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
         self.log_softmax = torch.nn.LogSoftmax(dim=-1)
         self.loss = Seq2SeqLoss()
 
-        self.joint_model = Seq2SeqModel.from_config_dict(self.cfg.joint_model)
+        self.joint_model = Seq2SeqModel.from_conf ig_dict(self.cfg.joint_model)
 
         self.encoder_trainable = Seq2SeqModel.from_config_dict(self.cfg.encoder_trainable)
         self.decoder_trainable = Seq2SeqModel.from_config_dict(self.cfg.decoder_trainable)
