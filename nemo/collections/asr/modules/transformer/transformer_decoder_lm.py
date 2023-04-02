@@ -40,7 +40,7 @@ class TransformerDecoderBlockLM(nn.Module):
         self.norm2 = nn.LayerNorm(normalized_shape=hidden_size)
 
     def forward(self, decoder_query, decoder_mask, decoder_keys, encoder_states, encoder_mask):
-        pass
+        
 
 class TransformerDecoderLM(nn.Module):
 
@@ -54,3 +54,16 @@ class TransformerDecoderLM(nn.Module):
                 hidden_act: str = "gelu",
                 pre_ln: bool = False) -> None:
         super().__init__()
+
+        block = TransformerDecoderBlockLM(
+                hidden_size = hidden_size,
+                inner_size = inner_size,
+                num_attention_heads = num_attention_heads,
+                attn_layer_dropout = attn_layer_dropout,
+                ffn_dropout = ffn_dropout,
+                hidden_act = hidden_act,
+                pre_ln = pre_ln            
+        )
+
+        self.layers = nn.ModuleList([copy.deepcopy(layer) for _ in range(num_layers)])
+
