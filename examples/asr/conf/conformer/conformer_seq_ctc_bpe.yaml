@@ -31,10 +31,6 @@ model:
   teacher_forcing_ratio: 0.8
   joint_model: true
 
-  # Make some of modules freeze
-  encoder_trainable: false
-  decoder_trainable: false
-
   train_ds:
     manifest_filepath: ??? #manifest.json
     sample_rate: ${model.sample_rate}
@@ -156,21 +152,8 @@ model:
   ctc_linear:
     _target_: torch.nn.Linear
     in_features: ${model.d_model}
-    out_features: 80
-
-  connector_conv:
-    _target_: torch.nnConv1d
-    in_channels: 176
-    out_channels: 176
-    kernel_size: 16
-    stride: 4
-
-  decoder_embedding:
-    _target_: torch.nn.Embedding
-    num_embeddings: 5000
-    embedding_dim: ${model.d_model}
-
-
+    out_features: 35
+    
   sequence_linear:
     _target_: torch.nn.Linear
     in_features: ${model.d_model}

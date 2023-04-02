@@ -14,18 +14,13 @@ from nemo.collections.asr.models import ASRModel
 from nemo.collections.asr.parts.mixins import ASRBPEMixin
 from nemo.collections.asr.losses.seq2seq import Seq2SeqLoss
 from nemo.collections.asr.metrics.seq2seq import Seq2SeqDecoder
-from nemo.collections.asr.metrics.wer_bpe import WERS2S, CTCBPEDecoding
+from nemo.collections.asr.metrics.wer_bpe import WERS2S
 from nemo.collections.asr.parts.preprocessing.perturb import process_augmentations
-from nemo.collections.nlp.models.language_modeling.transformer_lm_model import \
-        (get_transformer,
-        get_tokenizer)
+
 from nemo.core.classes import Exportable
 from nemo.core.classes.mixins import AccessMixin
 from nemo.core.classes.common import typecheck
 from nemo.utils import logging, model_utils
-
-from nemo.collections.asr.modules.transformer import TransformerDecoder
-
 
 from pytorch_lightning import Trainer
 
@@ -54,7 +49,6 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
         self.encoder = Seq2SeqModel.from_config_dict(self.cfg.encoder)
         self.decoder = Seq2SeqModel.from_config_dict(self.cfg.decoder)
         self.ctc_linear = Seq2SeqModel.from_config_dict(self.cfg.ctc_linear)
-        self.connector_conv = Seq2SeqModel.from_config_dict(self.cfg.connector_conv)
         self.decoder_embedding = Seq2SeqModel.from_config_dict(self.cfg.decoder_embedding)
         self.decoder_embedding.to(self.device)
         self.sequence_linear = Seq2SeqModel.from_config_dict(self.cfg.sequence_linear)
@@ -240,9 +234,6 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
         batch_size = encoded.size(0)
         bos_tokens = torch.ones(size=[batch_size, 1], dtype=torch.long).to(self.device) \
                 * self.decoder_tokenizer.bos_id
-        
-        if not self.joint_model:
-            encoded = self.connector_conv(encoded)
 
         if target is not None and random() < self.teacher_forcing_ratio:
             logits = self._decoder_forward(encoded, encoder_mask,bos_tokens,

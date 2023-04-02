@@ -26,7 +26,6 @@ from nemo.collections.asr.parts.utils import asr_module_utils
 from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis
 from nemo.collections.common import tokenizers
 from nemo.utils import logging
-from nemo.collections.asr.metrics.wer_bpe import CTCBPEDecoding
 
 class ASRBPEMixin(ABC):
     """ ASR BPE Mixin class that sets up a Tokenizer via a config
