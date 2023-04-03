@@ -16,7 +16,9 @@ from nemo.collections.asr.losses.seq2seq import Seq2SeqLoss
 from nemo.collections.asr.metrics.seq2seq import Seq2SeqDecoder
 from nemo.collections.asr.metrics.wer_bpe import WERS2S
 from nemo.collections.asr.parts.preprocessing.perturb import process_augmentations
-
+from nemo.collections.nlp.models.language_modeling.transformer_lm_model import \
+        (get_transformer,
+        get_tokenizer)
 from nemo.core.classes import Exportable
 from nemo.core.classes.mixins import AccessMixin
 from nemo.core.classes.common import typecheck
@@ -140,9 +142,20 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
         }
 
         return tensorboard_logs
-    
-    def _encoder_forward(self, input_signal:torch.Tensor,
-                         input_signal_length:torch.Tensor=None) -> Tuple[torch.Tensor]:
+
+    @typecheck()
+    def forward(self, input_signal, input_signal_length=None, target=None, target_length=None) -> Tuple[torch.Tensor]:
+        """Forwad through seq2seq model
+        Args:
+            input_signal (_type_): _description_
+            input_signal_length (_type_, optional): _description_. Defaults to None.
+            target_length (_type_, optional): _description_. Defaults to None.
+        Returns:
+            Tuple[torch.Tensor]: There are three tensors as following:
+                1- The logits output of decoder (unnormlized)
+                2- The prediction of encoder based on CTC
+                3- The length of output that encoder is processed
+        """
         processed_signal, processed_signal_length = self.preprocessor(
             input_signal=input_signal, length=input_signal_length,
         )
@@ -156,85 +169,46 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
         ctc_prediction = self.ctc_linear(encoded)
         ctc_prediction = self.log_softmax(ctc_prediction)
 
-        return encoded, encoded_len, ctc_prediction
-        
-
-    def _decoder_forward(self, memory:torch.Tensor, 
-                         memory_mask: torch.Tensor,
-                         bos_tokens: torch.Tensor,
-                         target:torch.Tensor=None, target_length:torch.Tensor=None,
-                         teacher_forcing:bool=False) -> Tuple[torch.Tensor]:
-        if teacher_forcing and target is not None:
-            decoder_mask = self._mask_generator(target_length)
-            bos_target_removed_eos = torch.cat([bos_tokens, target[:, :-1]], dim=1)
-            embedding = self.decoder_embedding(bos_target_removed_eos)
-            decoder_output = self.decoder(embedding, decoder_mask, memory, memory_mask)
-            logits = self.sequence_linear(decoder_output)
-            return logits
-
-        logits_list = []
-        batch_size = memory.size(0)
-        if not self.training:
-            eos_tokens = [False] * batch_size
-        step_length = torch.ones(batch_size, dtype=torch.long)
-        output_tensor = self.decoder_embedding(bos_tokens)
-        for i in range(self.max_seq_len if target_length is None else torch.max(target_length).item()):
-            decoder_mask = self._mask_generator(step_length)
-            decoder_output = self.decoder(output_tensor, decoder_mask, memory, memory_mask)
-            logits = self.sequence_linear(decoder_output)[:, -1]
-            logits_list.append(logits.unsqueeze(1))
-            next_tokens = torch.argmax(logits.detach(), dim=-1)
-            output_tensor = torch.cat([output_tensor, self.decoder_embedding(next_tokens).unsqueeze(1)], dim=1)
-            if not self.training:
-                for i in range(batch_size):
-                    if next_tokens[i].item() in {self.decoder_tokenizer.eos_id, self.decoder_tokenizer.pad_id}:
-                        eos_tokens[i] = True
-                if all(eos_tokens):
-                    break
-            if i == self.max_seq_len - 1:
-                logging.warning(f'The length of generated sequences exceeds the maximum length of {self.max_seq_len}')
-            elif self.training:
-                for i in range(batch_size):
-                    if step_length[i] < target_length[i]:
-                        step_length[i] += 1
-        logits = torch.cat(logits_list, dim=1)
-        return logits
-    
-
-    @typecheck()
-    def forward(self, input_signal, input_signal_length=None, target=None, target_length=None) -> Tuple[torch.Tensor]:
-        """Forwad through seq2seq model
-
-        Args:
-            input_signal (_type_): _description_
-            input_signal_length (_type_, optional): _description_. Defaults to None.
-            target_length (_type_, optional): _description_. Defaults to None.
-
-        Returns:
-            Tuple[torch.Tensor]: There are three tensors as following:
-                1- The logits output of decoder (unnormlized)
-                2- The prediction of encoder based on CTC
-                3- The length of output that encoder is processed
-        """
-        
-        encoded, encoded_len, ctc_prediction = self._encoder_forward(input_signal=input_signal,
-                                                                     input_signal_length=input_signal_length)
-        
         encoder_mask = self._mask_generator(encoded_len)
 
         batch_size = encoded.size(0)
         bos_tokens = torch.ones(size=[batch_size, 1], dtype=torch.long).to(self.device) \
                 * self.decoder_tokenizer.bos_id
 
-        if self.training:
-            logits = self._decoder_forward(encoded, encoder_mask,bos_tokens,
-                                           target, target_length, 
-                                           random() < self.teacher_forcing_ratio)
+        if target is not None and random() < self.teacher_forcing_ratio:
+            decoder_mask = self._mask_generator(target_length)
+            bos_target_removed_eos = torch.cat([bos_tokens, target[:, :-1]], dim=1)
+            embedding = self.decoder_embedding(bos_target_removed_eos)
+            decoder_output = self.decoder(embedding, decoder_mask, encoded, encoder_mask)
+            logits = self.sequence_linear(decoder_output)
+                    
         else:
-            logits = self._decoder_forward(encoded, encoder_mask,bos_tokens,
-                                           None, None, False)
+            logits_list = []
+            if not self.training:
+                eos_tokens = [False] * batch_size
+            step_length = torch.ones(batch_size, dtype=torch.long)
+            output_tensor = self.decoder_embedding(bos_tokens)
+            for i in range(self.max_seq_len if target_length is None else torch.max(target_length).item()):
+                decoder_mask = self._mask_generator(step_length)
+                decoder_output = self.decoder(output_tensor, decoder_mask, encoded, encoder_mask)
+                logits = self.sequence_linear(decoder_output)[:, -1]
+                logits_list.append(logits.unsqueeze(1))
+                next_tokens = torch.argmax(logits.detach(), dim=-1)
+                output_tensor = torch.cat([output_tensor, self.decoder_embedding(next_tokens).unsqueeze(1)], dim=1)
+                if not self.training:
+                    for i in range(batch_size):
+                        if next_tokens[i].item() in {self.decoder_tokenizer.eos_id, self.decoder_tokenizer.pad_id}:
+                            eos_tokens[i] = True
+                    if all(eos_tokens):
+                        break
+                if i == self.max_seq_len - 1:
+                    logging.warning(f'The length of generated sequences exceeds the maximum length of {self.max_seq_len}')
+                elif self.training:
+                    for i in range(batch_size):
+                        if step_length[i] < target_length[i]:
+                            step_length[i] += 1
+            logits = torch.cat(logits_list, dim=1)
         return logits, ctc_prediction, encoded_len
-            
 
 
     @torch.no_grad()
@@ -311,10 +285,8 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
     def _mask_generator(self, batch_lengths: torch.Tensor) -> torch.Tensor:
         """Generate mask respect to the given batch_lengths
         B : batch size
-
         Args:
             batch_lengths (torch.Tensor): lengths of each batch with shape [B]
-
         Returns:
             torch.Tensor: generated mask
         """
