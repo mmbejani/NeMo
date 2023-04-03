@@ -55,13 +55,6 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
         self.log_softmax = torch.nn.LogSoftmax(dim=-1)
         self.loss = Seq2SeqLoss()
 
-        self.encoder_trainable = Seq2SeqModel.from_config_dict(self.cfg.encoder_trainable)
-        self.decoder_trainable = Seq2SeqModel.from_config_dict(self.cfg.decoder_trainable)
-        if not self.encoder_trainable:
-            self.encoder.eval()
-        if not self.decoder_trainable:
-            self.decoder.eval()
-
         self.decoding = Seq2SeqDecoder(tokenizer=self.decoder_tokenizer)
         
         self._wer = WERS2S(
