@@ -164,7 +164,7 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
                          bos_tokens: torch.Tensor,
                          target:torch.Tensor=None, target_length:torch.Tensor=None,
                          teacher_forcing:bool=False) -> Tuple[torch.Tensor]:
-        if teacher_forcing:
+        if teacher_forcing and target is not None:
             decoder_mask = self._mask_generator(target_length)
             bos_target_removed_eos = torch.cat([bos_tokens, target[:, :-1]], dim=1)
             embedding = self.decoder_embedding(bos_target_removed_eos)
@@ -226,12 +226,15 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
         bos_tokens = torch.ones(size=[batch_size, 1], dtype=torch.long).to(self.device) \
                 * self.decoder_tokenizer.bos_id
 
-        if target is not None and random() < self.teacher_forcing_ratio:
+        if self.training:
             logits = self._decoder_forward(encoded, encoder_mask,bos_tokens,
-                                           target, target_length, True)
-            return logits, ctc_prediction, encoded_len
-            
+                                           target, target_length, 
+                                           random() < self.teacher_forcing_ratio)
+        else:
+            logits = self._decoder_forward(encoded, encoder_mask,bos_tokens,
+                                           None, None, False)
         return logits, ctc_prediction, encoded_len
+            
 
 
     @torch.no_grad()
