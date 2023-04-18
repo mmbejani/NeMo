@@ -23,6 +23,7 @@ from omegaconf import DictConfig, open_dict
 from omegaconf.listconfig import ListConfig
 from pytorch_lightning.callbacks import BasePredictionWriter
 from torch.utils.data import ChainDataset
+from transformers import Wav2Vec2FeatureExtractor
 
 from nemo.collections.asr.data import audio_to_text, audio_to_text_dali
 from nemo.collections.asr.parts.preprocessing.perturb import process_augmentations
@@ -206,12 +207,14 @@ def get_concat_bpe_dataset(
 
 def get_dual_bpe_dataset(
     config: dict, encoder_tokenizer: 'TokenizerSpec', decoder_tokenizer: 'TokenizerSpec',
+     normalizer: Wav2Vec2FeatureExtractor,
      augmentor: Optional['AudioAugment'] = None
     ) -> audio_to_text.AudioToDualBPEDataset:
     dataset = audio_to_text.AudioToDualBPEDataset(
         manifest_filepath=config['manifest_filepath'],
         encoder_tokenizer=encoder_tokenizer,
         decoder_tokenizer=decoder_tokenizer,
+        normalizer=normalizer,
         sample_rate=config['sample_rate'],
         int_values=config.get('int_values', False),
         augmentor=augmentor,

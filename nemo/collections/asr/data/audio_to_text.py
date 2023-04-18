@@ -25,6 +25,7 @@ from torch.nn.utils.rnn import pad_sequence
 import webdataset as wd
 from torch.utils.data import ChainDataset
 from tqdm import tqdm
+import librosa
 
 from nemo.collections.asr.parts.preprocessing.features import WaveformFeaturizer
 from nemo.collections.asr.parts.utils.audio_utils import ChannelSelectorType
@@ -41,6 +42,7 @@ from nemo.utils.data_utils import (
     is_datastore_path,
 )
 from nemo.utils.get_rank import is_global_rank_zero
+from transformers import Wav2Vec2FeatureExtractor
 
 __all__ = [
     'AudioToCharDataset',
@@ -475,8 +477,7 @@ class _AudioTextDualDataset(Dataset):
         manifest_filepath: str,
         encoder_parser: Union[str, Callable],
         decoder_parser: Union[str, Callable],
-        sample_rate: int,
-        int_values: bool = False,
+        normalizer: Wav2Vec2FeatureExtractor,
         augmentor: 'nemo.collections.asr.parts.perturb.AudioAugmentor' = None,
         max_duration: Optional[int] = None,
         min_duration: Optional[int] = None,
@@ -503,7 +504,7 @@ class _AudioTextDualDataset(Dataset):
             eos_id=eos_id,
             pad_id=pad_id,
         )
-        self.featurizer = WaveformFeaturizer(sample_rate=sample_rate, int_values=int_values, augmentor=augmentor)
+        self.normalizer = normalizer
         self.trim = trim
         self.return_sample_id = return_sample_id
         self.channel_selector = channel_selector
@@ -518,14 +519,9 @@ class _AudioTextDualDataset(Dataset):
         if offset is None:
             offset = 0
 
-        features = self.featurizer.process(
-            sample.audio_file,
-            offset=offset,
-            duration=sample.duration,
-            trim=self.trim,
-            orig_sr=sample.orig_sr,
-            channel_selector=self.channel_selector,
-        )
+        audio_data = librosa.load(sample.audio_file, sr=16000)
+        features = self.normalizer(audio_data)['input_values'][0]
+
         f, fl = features, torch.tensor(features.shape[0]).long()
 
         (et, etl), (dt, dtl) = self.manifest_processor.process_text_by_sample(sample=sample)
@@ -801,6 +797,7 @@ class AudioToDualBPEDataset(_AudioTextDualDataset):
         manifest_filepath: str,
         encoder_tokenizer: 'nemo.collections.common.tokenizers.TokenizerSpec',
         decoder_tokenizer: 'nemo.collections.common.tokenizers.TokenizerSpec',
+        normalizer: Wav2Vec2FeatureExtractor,
         sample_rate: int,
         int_values: bool = False,
         augmentor: 'nemo.collections.asr.parts.perturb.AudioAugmentor' = None,
@@ -840,6 +837,7 @@ class AudioToDualBPEDataset(_AudioTextDualDataset):
             manifest_filepath=manifest_filepath,
             encoder_parser=TokenizerWrapper(encoder_tokenizer),
             decoder_parser=TokenizerWrapper(decoder_tokenizer),
+            normalizer=normalizer,
             sample_rate=sample_rate,
             int_values=int_values,
             augmentor=augmentor,

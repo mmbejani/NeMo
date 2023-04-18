@@ -6,7 +6,7 @@ import torchaudio
 
 import soundfile as sf
 from typing import Dict, List, Optional, Union
-from omegaconf import DictConfig, open_dict
+from omegaconf import DictConfig
 from random import random
 
 from nemo.collections.asr.data import audio_to_text_dataset
@@ -24,6 +24,8 @@ from nemo.core.classes.mixins import AccessMixin
 from nemo.core.classes.common import typecheck
 from nemo.utils import logging, model_utils
 
+from transformers import Wav2Vec2Model, Wav2Vec2FeatureExtractor
+
 from pytorch_lightning import Trainer
 
 __all__ = ["Seq2SeqModel", "Seq2SeqModelWithLM"]
@@ -32,7 +34,6 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
 
     def __init__(self, cfg: DictConfig, trainer: Trainer = None):
         self.cfg = model_utils.convert_model_config_to_dict_config(cfg)
-
         if 'encoder_tokenizer' not in cfg and 'decoder_tokenizer' not in cfg:
             raise ValueError("`cfg` must have `tokenizer` config to create a tokenizer !")
         self._setup_dual_tokenizer(cfg.encoder_tokenizer, cfg.decoder_tokenizer)
@@ -45,10 +46,10 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
 
         super().__init__(cfg=cfg, trainer=trainer)
 
-        self.preprocessor = Seq2SeqModel.from_config_dict(self.cfg.preprocessor)
+        self.preprocessor = Wav2Vec2FeatureExtractor.from_pretrained('facebook/wav2vec2-xls-r-300m')
         if 'spec_augmentation' in self.cfg:
             self.spec_augmentation = Seq2SeqModel.from_config_dict(self.cfg.spec_augmentation)
-        self.encoder = Seq2SeqModel.from_config_dict(self.cfg.encoder)
+        self.encoder = Wav2Vec2Model.from_pretrained('facebook/wav2vec2-xls-r-300m')
         self.decoder = Seq2SeqModel.from_config_dict(self.cfg.decoder)
         self.ctc_linear = Seq2SeqModel.from_config_dict(self.cfg.ctc_linear)
         self.decoder_embedding = Seq2SeqModel.from_config_dict(self.cfg.decoder_embedding)
@@ -205,15 +206,9 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
                 1- The logits output of decoder (unnormlized)
                 2- The prediction of encoder based on CTC
                 3- The length of output that encoder is processed
-        """
-        processed_signal, processed_signal_length = self.preprocessor(
-            input_signal=input_signal, length=input_signal_length,
-        )
-        if hasattr(self, "spec_augmentation") and self.spec_augmentation is not None and self.training:
-            processed_signal = self.spec_augmentation(input_spec=processed_signal, length=processed_signal_length)
-         
-        encoded, encoded_len, encoder_mask, ctc_prediction = self._encoder_forward(processed_signal=processed_signal,
-                                                                      processed_signal_length=processed_signal_length)
+        """         
+        encoded, encoded_len, encoder_mask, ctc_prediction = self._encoder_forward(processed_signal=input_signal,
+                                                                      processed_signal_length=input_signal_length)
 
         batch_size = encoded.size(0)
         bos_tokens = torch.ones(size=[batch_size, 1], dtype=torch.long).to(self.device) \
@@ -266,7 +261,11 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
             logging.warning(f"Could not load dataset as `manifest_filepath` was None. Provided config : {config}")
             return None
             
-        dataset = audio_to_text_dataset.get_dual_bpe_dataset(config=config, augmentor=augmentor, encoder_tokenizer=self.encoder_tokenizer, decoder_tokenizer=self.decoder_tokenizer)
+        dataset = audio_to_text_dataset.get_dual_bpe_dataset(config=config, 
+                                                             augmentor=augmentor, 
+                                                             encoder_tokenizer=self.encoder_tokenizer, 
+                                                             decoder_tokenizer=self.decoder_tokenizer,
+                                                             normalizer=self.preprocessor)
 
         if hasattr(dataset, 'collate_fn'):
             collate_fn = dataset.collate_fn
