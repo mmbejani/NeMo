@@ -206,9 +206,9 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
                 1- The logits output of decoder (unnormlized)
                 2- The prediction of encoder based on CTC
                 3- The length of output that encoder is processed
-        """         
-        encoded, encoded_len, encoder_mask, ctc_prediction = self._encoder_forward(processed_signal=input_signal,
-                                                                      processed_signal_length=input_signal_length)
+        """
+        encoded, encoded_len, encoder_mask, ctc_prediction = self._encoder_forward(processed_signal=input_signal.cuda(),
+                                                                      processed_signal_length=input_signal_length.cuda())
 
         batch_size = encoded.size(0)
         bos_tokens = torch.ones(size=[batch_size, 1], dtype=torch.long).to(self.device) \
@@ -231,7 +231,7 @@ class Seq2SeqModel(ASRModel, ASRBPEMixin, Exportable):
 
     @torch.no_grad()
     def transcribe(self, audio_bytes: List[bytes]) -> List[str]:
-        audios = [torch.tensor(sf.read(audio_byte)[0], dtype=torch.float32) for audio_byte in audio_bytes]
+        audios = [torch.tensor(sf.read(audio_byte)[0], dtype=torch.float32).cuda() for audio_byte in audio_bytes]
         audios_length = [audio.size(0) for audio in audios]
         
         input_length = torch.tensor(audios_length).long()
